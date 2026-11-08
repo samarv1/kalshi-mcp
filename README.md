@@ -33,12 +33,10 @@ The server runs as one Python process. An agent application connects over MCP, a
 ```mermaid
 flowchart LR
     A["Agent application<br/>and MCP client"] -->|MCP over stdio| B
-    subgraph Server["kalshi-mcp: one Python process"]
-        B[Tool handlers] --> C[Kalshi HTTP client]
-        D[Response models] -. Define returned data .-> B
-        E[Server setup] -. Manages lifetime .-> B
-        E -. Manages lifetime .-> C
-    end
+    B[Tool handlers] --> C[Kalshi HTTP client]
+    D[Response models] -. Define returned data .-> B
+    E[Server setup] -. Manages lifetime .-> B
+    E -. Manages lifetime .-> C
     C -->|HTTPS| F[Kalshi REST API]
 ```
 
@@ -67,29 +65,18 @@ Concurrent requests and retries are capped. Only temporary read failures are ret
 
 As of Nov 8, 2026, [Kalshi's official MCP](https://docs.kalshi.com/getting_started/mcp) discourages systematic scans in its tool descriptions. The settled-market responses we checked also omitted payout values and settlement timestamps. This server uses REST directly for discovery filters and settlement fields, without depending on the official MCP.
 
-## Data guarantees and limitations
+## Data handling
 
-- Listings return compact records and identify whether results are incomplete. Detail tools preserve relevant rule text.
-- Monetary values and contract quantities keep the API's decimal strings to avoid rounding. Missing values remain distinct from zero.
-- Retrieval timestamps are separate from exchange timestamps. Fetching a response now does not prove its quotes were updated now.
-- Invalid input, missing resources, rate limiting, upstream failures, and malformed responses remain distinguishable. A failed book request must not look like an empty book.
-- Listing calls do not recursively scan child resources or automatically consume every page. Responses identify truncation and whether more results are available, including where native pagination is unavailable.
-- Batch results preserve partial success when the upstream response supports it. A request-wide failure remains a request-wide error.
-- `get_market` automatically resolves current versus historical storage using bounded requests and identifies the source. Temporary API failures must not be treated as evidence that a market was archived.
-- Responses include prices. Agents that need independent forecasts should keep prices out of the forecasting step.
-- Order books describe observed liquidity, not guaranteed fills.
-- Series fee metadata is not necessarily a complete fee quote because event overrides can apply.
-- A closed market may still be waiting for settlement. Use the actual payout value for settlement accounting rather than deriving it from a YES/NO label.
+- Listings return summaries and flag incomplete results. Fetch additional pages explicitly; use detail tools for contract rules.
+- Monetary values and quantities retain decimal strings. Missing values are separate from zero.
+- Retrieval time and exchange timestamps are separate. A new response can contain older quotes.
+- Errors are distinct from empty results. Batches retain successful results where supported and report failures.
+- Order books show available liquidity, without guaranteeing fills. Series fees may have event-specific overrides.
+- Closed markets may still await settlement. Use the actual payout value for accounting.
 
 ## Scope and exclusions
 
-The server provides read-only exchange data. It does not include:
-
-- Live order placement, cancellation, or authenticated portfolio management.
-- Paper fills, account balances, positions, reserve policies, or performance accounting.
-- Market selection, research, forecasts, opportunity ranking, or position sizing.
-- Combo construction, RFQ workflows, perpetual futures, price alerts, and price-history analysis.
-- Execution-cost estimates, a persistent database, caching, and background workers.
+Read-only market data only. No order placement, portfolio access, paper trading, research, or position sizing. Combo/RFQ workflows, perpetual futures, alerts, price-history analysis, and execution-cost estimates are outside the scope.
 
 ## API references
 
