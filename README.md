@@ -6,14 +6,34 @@ This is an independent project, not an official Kalshi product.
 
 The server supplies exchange information. The agent handles research, forecasts, trading decisions, paper accounting, and risk limits.
 
+## Setup
+
+TBD.
+
+## Tools
+
+Kalshi groups markets into **series** (recurring event types) and **events** (specific occurrences). Each series, event, and market has a ticker used to look it up.
+
+| Tool | What it does |
+| --- | --- |
+| `list_series` | Find series by category and tags |
+| `get_series` | Read contract references, settlement sources, and available fee metadata |
+| `list_events` | Find events using filters and pagination |
+| `get_event` | Read an event and its parent-series context |
+| `list_markets` | Get market summaries filtered by identifiers, status, and time |
+| `get_market` | Read contract rules, prices, status, and available settlement fields, including archived markets |
+| `get_orderbooks` | Get order-book depth for a limited batch of market tickers |
+
+Filters and pagination vary by endpoint. Listing calls return one page at a time where pagination is supported. If you already know the tickers, go straight to `get_market` and `get_orderbooks`.
+
 ## Architecture
 
 The server runs as one Python process. An agent application connects over MCP, and tool handlers retrieve data from Kalshi's REST API.
 
 ```mermaid
-flowchart TD
-    A[Agent application and MCP client] -->|MCP over stdio| B
-    subgraph Server[kalshi-mcp: one Python process]
+flowchart LR
+    A["Agent application<br/>and MCP client"] -->|MCP over stdio| B
+    subgraph Server["kalshi-mcp: one Python process"]
         B[Tool handlers] --> C[Kalshi HTTP client]
         D[Response models] -. Define returned data .-> B
         E[Server setup] -. Manages lifetime .-> B
@@ -31,53 +51,21 @@ flowchart TD
 
 The server uses the [official Python MCP SDK](https://github.com/modelcontextprotocol/python-sdk) for protocol handling and [HTTPX](https://www.python-httpx.org/) for asynchronous HTTP requests and connection reuse.
 
-### Request flow
-
-For `get_market(ticker)`:
-
-1. The MCP client invokes the tool with a market identifier.
-2. The handler validates the input and delegates retrieval to the Kalshi client.
-3. The Kalshi client retrieves the market from current or historical storage.
-4. The handler returns contract details, available settlement fields, retrieval time, and the data source.
-
 With stdio, the client launches the server as a subprocess. Protocol messages use stdin and stdout; logs use stderr. This follows the [MCP transport specification](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports).
 
-## Architectural decisions and tradeoffs
+### Design choices
 
-| Decision | Rationale | Tradeoff |
+| Choice | Why | Tradeoff |
 | --- | --- | --- |
-| One custom server calling Kalshi REST directly | Keeps discovery, inspection, books, and settlement fields consistent for systematic use | We own API compatibility, response handling, and tests |
-| Official MCP SDK plus a small HTTPX client | Reuses the protocol implementation while limiting our API code to required endpoints | We maintain endpoint mappings rather than relying on a broad generated Kalshi client |
-| Local stdio transport | Fits a client-launched process without operating a network server | Remote or shared deployment would need additional transport and access-control work |
-| Focused tools, bounded order-book batches | Keeps tools focused and limits how much each call fetches | Some workflows require multiple calls rather than one combined discovery operation |
-| Automatic historical lookup in `get_market` | Callers can inspect a known contract without understanding Kalshi's storage split | Lookup may require additional requests; routing and failures need testing |
-| Caller-controlled pagination | Lets the agent decide how many pages to fetch | The agent must track pagination and request each page |
-| No persistent storage or cache | Keeps freshness behavior clear and removes database operations from this package | Repeated reads use network requests; snapshots and history must be stored by the consumer |
-| Strategy and paper accounting stay in the consumer | Keeps the server reusable across market categories and agents | Consumers must implement their own forecasts, account state, and risk controls |
+| Direct Kalshi REST access | Gives all tools the same API client and access to the fields they need | We maintain compatibility with Kalshi's API |
+| Local stdio | Runs as a subprocess without hosting a server | No remote or shared deployment |
+| No database or cache | Reads from Kalshi on each call, with no storage to set up | Repeated calls use the network; the agent must save any history it needs |
 
-Independent requests run with bounded concurrency. Retries are limited to appropriate temporary read failures and respect rate-limit responses.
+Concurrent requests and retries are capped. Only temporary read failures are retried, with rate limits respected.
 
 ### Why not use the official Kalshi MCP?
 
-[Kalshi's official hosted connector](https://docs.kalshi.com/getting_started/mcp) supports interactive market research. In a small evaluation on November 8, 2026, its tool descriptions discouraged systematic scans, and inspected settled-market responses omitted payout values and settlement timestamps available through REST. Direct REST access gives this project explicit discovery filters and settlement fields through one interface, at the cost of maintaining API compatibility. The official connector is not a runtime dependency.
-
-## Tools
-
-Kalshi organizes contracts into **series** (recurring event types), **events** (particular occurrences), and **markets** (tradable outcomes). A ticker is the identifier used to retrieve one of these resources.
-
-| Tool | Responsibility |
-| --- | --- |
-| `list_series` | Discover series using supported category and tag filters |
-| `get_series` | Inspect a series, its contract references, settlement sources, and available fee metadata |
-| `list_events` | Discover events using supported filters and pagination |
-| `get_event` | Inspect a known event and its parent-series context without scanning listings |
-| `list_markets` | Retrieve compact market summaries using supported identifiers, status, and time filters |
-| `get_market` | Retrieve relevant contract details, prices, status, and available settlement fields, including historical lookup |
-| `get_orderbooks` | Retrieve order-book depth for a bounded batch of market tickers |
-
-Filter combinations and pagination depend on the underlying API endpoint. Not every listing endpoint supports cursor pagination.
-
-A client can explore series and events before selecting markets, or go directly to `get_market` and `get_orderbooks` when it already knows the tickers.
+As of Nov 8, 2026, [Kalshi's official MCP](https://docs.kalshi.com/getting_started/mcp) discourages systematic scans in its tool descriptions. The settled-market responses we checked also omitted payout values and settlement timestamps. This server uses REST directly for discovery filters and settlement fields, without depending on the official MCP.
 
 ## Data guarantees and limitations
 
@@ -88,8 +76,7 @@ A client can explore series and events before selecting markets, or go directly 
 - Listing calls do not recursively scan child resources or automatically consume every page. Responses identify truncation and whether more results are available, including where native pagination is unavailable.
 - Batch results preserve partial success when the upstream response supports it. A request-wide failure remains a request-wide error.
 - `get_market` automatically resolves current versus historical storage using bounded requests and identifies the source. Temporary API failures must not be treated as evidence that a market was archived.
-- Responses include prices. A consuming application that requires independent forecasts must isolate price information from its forecasting step.
-
+- Responses include prices. Agents that need independent forecasts should keep prices out of the forecasting step.
 - Order books describe observed liquidity, not guaranteed fills.
 - Series fee metadata is not necessarily a complete fee quote because event overrides can apply.
 - A closed market may still be waiting for settlement. Use the actual payout value for settlement accounting rather than deriving it from a YES/NO label.
