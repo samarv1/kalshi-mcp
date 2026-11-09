@@ -53,6 +53,12 @@ def handle(request):
                 'event': {**event, 'event_ticker': 'CONTEXTFAIL', 'series_ticker': 'MISSING'}
             })
         return httpx.Response(200, json={'event': event})
+    if request.url.path.endswith('/markets'):
+        assert request.url.params['mve_filter'] == 'exclude'
+        assert request.url.params['event_ticker'] == event['event_ticker']
+        if request.url.params.get('cursor') == 'MARKET-NEXT':
+            return httpx.Response(200, json={'markets': [], 'cursor': ''})
+        return httpx.Response(200, json={'markets': [market], 'cursor': 'MARKET-NEXT'})
     return httpx.Response(200, json={'market': market})
 
 http = httpx.AsyncClient(transport=httpx.MockTransport(handle))
@@ -76,7 +82,7 @@ print('http_closed=' + str(http.is_closed), file=sys.stderr)
                 discovery = await session.list_tools()
                 tools = {tool.name: tool for tool in discovery.tools}
                 assert set(tools) == {
-                    "get_market", "get_series", "list_series", "get_event", "list_events",
+                    "get_market", "get_series", "list_series", "get_event", "list_events", "list_markets",
                 }
                 tool = tools["get_market"]
                 assert tool.description == "Read a market's rules, prices, status, and available settlement data."
@@ -165,4 +171,35 @@ print('http_closed=' + str(http.is_closed), file=sys.stderr)
                 bad_status = await session.call_tool("list_events", {"status": "active"})
                 assert bad_status.is_error
                 assert set(tools["get_event"].input_schema["properties"]) == {"event_ticker"}
+
+                markets = await session.call_tool(
+                    "list_markets", {"event_ticker": event_ticker, "limit": 1}
+                )
+                assert not markets.is_error
+                assert markets.structured_content["historical_lookup_performed"] is False
+                assert markets.structured_content["combo_markets_included"] is False
+                assert markets.structured_content["next_cursor"] == "MARKET-NEXT"
+                summary = markets.structured_content["markets"][0]
+                assert summary["event_ticker"] == event_ticker
+                assert "rules_primary" not in summary
+
+                market_detail = await session.call_tool("get_market", {"ticker": summary["ticker"]})
+                assert not market_detail.is_error
+                assert market_detail.structured_content["market"]["rules_primary"] == market["rules_primary"]
+                assert market_detail.structured_content["market"]["event_ticker"] == event_ticker
+
+                last_markets = await session.call_tool("list_markets", {
+                    "event_ticker": event_ticker, "limit": 1,
+                    "cursor": markets.structured_content["next_cursor"],
+                })
+                assert not last_markets.is_error
+                assert last_markets.structured_content["markets"] == []
+                assert last_markets.structured_content["next_cursor"] is None
+
+                invalid_filters = await session.call_tool("list_markets", {
+                    "min_created_ts": 0, "status": "closed",
+                })
+                assert invalid_filters.is_error
+                assert "Status is incompatible" in invalid_filters.content[0].text
+                assert "mve_filter" not in tools["list_markets"].input_schema["properties"]
     assert "http_closed=True" in stderr_path.read_text()

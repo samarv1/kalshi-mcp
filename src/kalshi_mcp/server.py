@@ -10,6 +10,7 @@ from kalshi_mcp.client import MAX_CONCURRENT_REQUESTS, KalshiClient
 from kalshi_mcp.models import (
     EventListResponse,
     EventResponse,
+    MarketListResponse,
     MarketResponse,
     SeriesListResponse,
     SeriesResponse,
@@ -17,16 +18,18 @@ from kalshi_mcp.models import (
 from kalshi_mcp.tools import (
     Cursor,
     EventStatus,
-    EventTickers,
     ListingLimit,
+    MarketStatus,
     SeriesFilter,
     Ticker,
+    TickerFilter,
     UnixTimestamp,
 )
 from kalshi_mcp.tools import get_event as read_event
 from kalshi_mcp.tools import get_market as read_market
 from kalshi_mcp.tools import get_series as read_series
 from kalshi_mcp.tools import list_events as find_events
+from kalshi_mcp.tools import list_markets as find_markets
 from kalshi_mcp.tools import list_series as find_series
 
 
@@ -90,7 +93,7 @@ async def get_series(series_ticker: Ticker, ctx: Context[KalshiClient]) -> Serie
 async def list_events(
     ctx: Context[KalshiClient],
     series_ticker: Ticker | None = None,
-    tickers: EventTickers | None = None,
+    tickers: TickerFilter | None = None,
     status: EventStatus | None = None,
     min_close_ts: UnixTimestamp | None = None,
     min_updated_ts: UnixTimestamp | None = None,
@@ -118,6 +121,52 @@ async def list_events(
 )
 async def get_event(event_ticker: Ticker, ctx: Context[KalshiClient]) -> EventResponse:
     return await read_event(event_ticker, ctx.request_context.lifespan_context)
+
+
+@mcp.tool(
+    description=(
+        "List market summaries from the live endpoint. "
+        "Older settled markets may require historical lookup with get_market. "
+        "Pass next_cursor as cursor with the same filters to continue. "
+        "Time filters use Unix seconds. Updated-time filters track metadata changes. "
+        "Combo markets are excluded."
+    ),
+    annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True),
+)
+async def list_markets(
+    ctx: Context[KalshiClient],
+    event_ticker: Ticker | None = None,
+    series_ticker: Ticker | None = None,
+    tickers: TickerFilter | None = None,
+    status: MarketStatus | None = None,
+    min_created_ts: UnixTimestamp | None = None,
+    max_created_ts: UnixTimestamp | None = None,
+    min_close_ts: UnixTimestamp | None = None,
+    max_close_ts: UnixTimestamp | None = None,
+    min_settled_ts: UnixTimestamp | None = None,
+    max_settled_ts: UnixTimestamp | None = None,
+    min_updated_ts: UnixTimestamp | None = None,
+    max_updated_ts: UnixTimestamp | None = None,
+    limit: ListingLimit = 50,
+    cursor: Cursor | None = None,
+) -> MarketListResponse:
+    return await find_markets(
+        ctx.request_context.lifespan_context,
+        event_ticker=event_ticker,
+        series_ticker=series_ticker,
+        tickers=tickers,
+        status=status,
+        min_created_ts=min_created_ts,
+        max_created_ts=max_created_ts,
+        min_close_ts=min_close_ts,
+        max_close_ts=max_close_ts,
+        min_settled_ts=min_settled_ts,
+        max_settled_ts=max_settled_ts,
+        min_updated_ts=min_updated_ts,
+        max_updated_ts=max_updated_ts,
+        limit=limit,
+        cursor=cursor,
+    )
 
 
 # Keep logs on stderr because stdout carries MCP protocol messages.

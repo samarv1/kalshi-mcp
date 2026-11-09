@@ -5,7 +5,7 @@ import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 
 from kalshi_mcp.client import KalshiClient
-from kalshi_mcp.tools import get_event, get_market, get_series, list_events, list_series
+from kalshi_mcp.tools import get_event, get_market, get_series, list_events, list_markets, list_series
 
 
 pytestmark = pytest.mark.anyio
@@ -291,3 +291,100 @@ async def test_event_request_failures_remain_tool_errors(operation):
                 await get_event("EXAMPLE", client)
             else:
                 await list_events(client)
+
+
+@pytest.mark.parametrize("arguments,reason", [
+    ({"min_created_ts": 0, "max_close_ts": 10}, "one timestamp group"),
+    ({"min_close_ts": 0, "min_settled_ts": 10}, "one timestamp group"),
+    ({"max_updated_ts": 0, "max_created_ts": 10}, "one timestamp group"),
+    ({"min_created_ts": 1, "status": "closed"}, "Status is incompatible"),
+    ({"max_created_ts": 0, "status": "paused"}, "Status is incompatible"),
+    ({"min_close_ts": 1, "status": "open"}, "Status is incompatible"),
+    ({"max_settled_ts": 1, "status": "closed"}, "Status is incompatible"),
+    ({"min_updated_ts": 1, "status": "open"}, "Status is incompatible"),
+    ({"min_updated_ts": 1, "event_ticker": "EXAMPLE"}, "allow only series_ticker"),
+    ({"max_updated_ts": 1, "tickers": ["EXAMPLE"]}, "allow only series_ticker"),
+    *[({f"min_{group}_ts": 2, f"max_{group}_ts": 1}, "Minimum timestamp")
+      for group in ("created", "close", "settled", "updated")],
+])
+async def test_invalid_market_filter_combinations_never_send_a_request(arguments, reason):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(500)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        with pytest.raises(ToolError) as error:
+            await list_markets(KalshiClient(http), **arguments)
+    details = json.loads(str(error.value))
+    assert details["code"] == "invalid_arguments"
+    assert details["field"] == "filters"
+    assert reason in details["reason"]
+    assert requests == []
+
+
+@pytest.mark.parametrize("arguments", [
+    {"event_ticker": "../bad"}, {"tickers": []}, {"tickers": ["EXAMPLE"] * 101},
+    {"status": "active"}, {"limit": 0}, {"limit": 201}, {"limit": True},
+    {"min_created_ts": -1}, {"max_close_ts": "123"}, {"min_settled_ts": True},
+    {"cursor": 123},
+])
+async def test_invalid_market_filter_values_never_send_a_request(arguments):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(500)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        with pytest.raises(ToolError, match="invalid_arguments"):
+            await list_markets(KalshiClient(http), **arguments)
+    assert requests == []
+
+
+@pytest.mark.parametrize("arguments", [
+    {"min_created_ts": 0, "status": "unopened"},
+    {"max_created_ts": 0, "status": "open"},
+    {"min_created_ts": 1, "max_created_ts": 1},
+    {"min_close_ts": 0, "max_close_ts": 100, "status": "closed"},
+    {"min_settled_ts": 0, "status": "settled"},
+    {"min_updated_ts": 0, "max_updated_ts": 100, "series_ticker": "EXAMPLESERIES", "cursor": "next"},
+    {"event_ticker": "EXAMPLE", "tickers": ["EXAMPLE-YES"], "status": "open"},
+    {"status": "paused"},
+])
+async def test_valid_market_filter_combinations_reach_the_endpoint(arguments):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"markets": [], "cursor": ""})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        result = await list_markets(KalshiClient(http), **arguments)
+    assert result.markets == []
+    assert len(requests) == 1
+    assert requests[0].url.params["mve_filter"] == "exclude"
+
+
+async def test_market_page_limit_and_ticker_filter_bounds():
+    tickers = [f"EXAMPLE{i}" for i in range(100)]
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"markets": [], "cursor": ""})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        await list_markets(KalshiClient(http), tickers=tickers, limit=200, cursor="")
+    assert requests[0].url.params["limit"] == "200"
+    assert requests[0].url.params["tickers"] == ",".join(tickers)
+    assert requests[0].url.params["cursor"] == ""
+
+
+async def test_market_listing_failure_is_a_tool_error():
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(500))
+    ) as http:
+        with pytest.raises(ToolError, match="upstream_http_error"):
+            await list_markets(KalshiClient(http))

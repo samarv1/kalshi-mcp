@@ -23,34 +23,37 @@ class PriceRange(BaseModel):
 
 # Dollar fields use USD strings and *_fp fields use contract-count strings.
 # Preserve their precision and keep unavailable optional values distinct from zero.
-class Market(BaseModel):
+class MarketSummary(BaseModel):
     model_config = ConfigDict(strict=True)
 
     ticker: NonEmptyString
     event_ticker: NonEmptyString
     market_type: Literal["binary", "scalar"]
     status: NonEmptyString
-    rules_primary: str
-    rules_secondary: str
     title: str | None = None
-    subtitle: str | None = None
     yes_sub_title: str | None = None
     no_sub_title: str | None = None
     yes_bid_dollars: DecimalString | None = None
     yes_ask_dollars: DecimalString | None = None
     no_bid_dollars: DecimalString | None = None
     no_ask_dollars: DecimalString | None = None
-    yes_bid_size_fp: DecimalString | None = None
-    yes_ask_size_fp: DecimalString | None = None
     last_price_dollars: DecimalString | None = None
-    notional_value_dollars: DecimalString | None = None
     volume_fp: DecimalString | None = None
     volume_24h_fp: DecimalString | None = None
     open_interest_fp: DecimalString | None = None
-    created_time: AwareDatetime | None = None
     updated_time: AwareDatetime | None = None
-    open_time: AwareDatetime | None = None
     close_time: AwareDatetime | None = None
+
+
+class Market(MarketSummary):
+    rules_primary: str
+    rules_secondary: str
+    subtitle: str | None = None
+    yes_bid_size_fp: DecimalString | None = None
+    yes_ask_size_fp: DecimalString | None = None
+    notional_value_dollars: DecimalString | None = None
+    created_time: AwareDatetime | None = None
+    open_time: AwareDatetime | None = None
     expected_expiration_time: AwareDatetime | None = None
     latest_expiration_time: AwareDatetime | None = None
     occurrence_datetime: AwareDatetime | None = None
@@ -85,6 +88,26 @@ class MarketResponse(BaseModel):
     source: Source
     retrieved_at: datetime
     market: Market
+
+
+class MarketListPayload(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    markets: list[MarketSummary]
+    cursor: str
+
+
+# Coverage identifies the queried endpoints independently of market settlement status.
+class MarketListResponse(BaseModel):
+    source: Literal["live"]
+    retrieved_at: datetime
+    markets: list[MarketSummary]
+    next_cursor: str | None
+    truncated: bool
+    pagination_supported: Literal[True] = True
+    pagination_mode: Literal["upstream"] = "upstream"
+    historical_lookup_performed: Literal[False] = False
+    combo_markets_included: Literal[False] = False
 
 
 class SettlementSource(BaseModel):

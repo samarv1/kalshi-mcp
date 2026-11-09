@@ -12,6 +12,8 @@ from kalshi_mcp.models import (
     EventListResponse,
     EventPayload,
     EventResponse,
+    MarketListPayload,
+    MarketListResponse,
     MarketPayload,
     MarketResponse,
     SeriesContextError,
@@ -208,6 +210,61 @@ class KalshiClient:
                     source="live",
                     retrieved_at=retrieved_at,
                     events=payload.events,
+                    next_cursor=payload.cursor or None,
+                    truncated=bool(payload.cursor),
+                )
+        except TimeoutError as exc:
+            raise KalshiError("timeout", "live") from exc
+
+    # Query only the live listing and exclude combos, matching the server's MVP scope.
+    async def list_markets(
+        self,
+        *,
+        event_ticker: str | None = None,
+        series_ticker: str | None = None,
+        tickers: list[str] | None = None,
+        status: str | None = None,
+        min_created_ts: int | None = None,
+        max_created_ts: int | None = None,
+        min_close_ts: int | None = None,
+        max_close_ts: int | None = None,
+        min_settled_ts: int | None = None,
+        max_settled_ts: int | None = None,
+        min_updated_ts: int | None = None,
+        max_updated_ts: int | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> MarketListResponse:
+        filters = {
+            "event_ticker": event_ticker,
+            "series_ticker": series_ticker,
+            "status": status,
+            "min_created_ts": min_created_ts,
+            "max_created_ts": max_created_ts,
+            "min_close_ts": min_close_ts,
+            "max_close_ts": max_close_ts,
+            "min_settled_ts": min_settled_ts,
+            "max_settled_ts": max_settled_ts,
+            "min_updated_ts": min_updated_ts,
+            "max_updated_ts": max_updated_ts,
+            "limit": limit,
+            "cursor": cursor,
+        }
+        params = {key: str(value) for key, value in filters.items() if value is not None}
+        params["mve_filter"] = "exclude"
+        if tickers is not None:
+            params["tickers"] = ",".join(tickers)
+        try:
+            async with asyncio.timeout(TOOL_TIMEOUT_SECONDS) as deadline:
+                payload, retrieved_at = await self._read_payload(
+                    "/markets", "live", deadline, MarketListPayload, params
+                )
+                if len(payload.markets) > limit:
+                    raise KalshiError("invalid_response", "live")
+                return MarketListResponse(
+                    source="live",
+                    retrieved_at=retrieved_at,
+                    markets=payload.markets,
                     next_cursor=payload.cursor or None,
                     truncated=bool(payload.cursor),
                 )

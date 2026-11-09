@@ -8,10 +8,10 @@ def anyio_backend():
 
 
 @pytest.fixture
-def market():
+def market(event):
     return {
         "ticker": "EXAMPLE-26NOV09-YES",
-        "event_ticker": "EXAMPLE-26NOV09",
+        "event_ticker": event["event_ticker"],
         "market_type": "binary",
         "status": "active",
         "yes_sub_title": "Example outcome",

@@ -539,3 +539,127 @@ async def test_event_page_exceeding_requested_limit_is_an_error(event):
     ) as http:
         with pytest.raises(KalshiError, match="invalid_response"):
             await KalshiClient(http).list_events(limit=1)
+
+
+async def test_market_listing_preserves_summaries_and_forwards_identifiers(market):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"markets": [market], "cursor": "next+/="})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        result = await KalshiClient(http).list_markets(
+            event_ticker=market["event_ticker"], series_ticker="EXAMPLESERIES",
+            tickers=[market["ticker"], "OTHER"], status="open", limit=200, cursor="previous+/=",
+        )
+    assert len(requests) == 1
+    assert requests[0].url.path == "/trade-api/v2/markets"
+    assert dict(requests[0].url.params) == {
+        "event_ticker": market["event_ticker"], "series_ticker": "EXAMPLESERIES",
+        "tickers": f"{market['ticker']},OTHER", "status": "open", "limit": "200",
+        "cursor": "previous+/=", "mve_filter": "exclude",
+    }
+    assert result.next_cursor == "next+/="
+    assert result.truncated
+    assert result.pagination_mode == "upstream"
+    assert result.historical_lookup_performed is False
+    assert result.combo_markets_included is False
+    summary = result.markets[0].model_dump(mode="json")
+    assert summary["status"] == "active"
+    assert summary["yes_bid_dollars"] == "0.420000"
+    assert summary["volume_fp"] == "123.50"
+    assert summary["yes_ask_dollars"] == "0.4500"
+    assert summary["no_bid_dollars"] is None
+    assert "rules_primary" not in summary
+    assert "settlement_value_dollars" not in summary
+
+
+@pytest.mark.parametrize("group", ["created", "close", "settled", "updated"])
+async def test_all_market_timestamp_parameters_are_forwarded(group):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"markets": [], "cursor": ""})
+
+    filters = {f"min_{group}_ts": 0, f"max_{group}_ts": 123}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        await KalshiClient(http).list_markets(**filters)
+    assert requests[0].url.params[f"min_{group}_ts"] == "0"
+    assert requests[0].url.params[f"max_{group}_ts"] == "123"
+    assert requests[0].url.params["mve_filter"] == "exclude"
+
+
+@pytest.mark.parametrize("cursor", ["", "next"])
+async def test_empty_market_page_retains_continuation(cursor):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"markets": [], "cursor": cursor})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        result = await KalshiClient(http).list_markets()
+    assert result.markets == []
+    assert result.next_cursor == (cursor or None)
+    assert result.truncated is bool(cursor)
+    assert dict(requests[0].url.params) == {"limit": "50", "mve_filter": "exclude"}
+
+
+@pytest.mark.parametrize("body", [
+    {}, {"markets": None, "cursor": ""}, {"markets": [{}], "cursor": ""},
+    {"markets": [], "cursor": None},
+])
+async def test_malformed_market_listing_is_an_error(body):
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body))
+    ) as http:
+        with pytest.raises(KalshiError, match="invalid_response"):
+            await KalshiClient(http).list_markets()
+
+
+async def test_market_listing_does_not_require_detail_rules(market):
+    del market["rules_primary"]
+    del market["rules_secondary"]
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(
+            200, json={"markets": [market], "cursor": ""}
+        ))
+    ) as http:
+        result = await KalshiClient(http).list_markets()
+    assert result.markets[0].ticker == market["ticker"]
+
+
+async def test_market_page_exceeding_requested_limit_is_an_error(market):
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(
+            200, json={"markets": [market, {**market, "ticker": "OTHER"}], "cursor": "next"}
+        ))
+    ) as http:
+        with pytest.raises(KalshiError, match="invalid_response"):
+            await KalshiClient(http).list_markets(limit=1)
+
+
+async def test_market_listing_failure_does_not_trigger_historical_scanning():
+    paths = []
+
+    def handle(request):
+        paths.append(request.url.path)
+        return httpx.Response(500)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        with pytest.raises(KalshiError, match="upstream_http_error"):
+            await KalshiClient(http).list_markets()
+    assert paths == ["/trade-api/v2/markets"]
+
+
+async def test_market_listing_obeys_tool_deadline(monkeypatch):
+    monkeypatch.setattr(client_module, "TOOL_TIMEOUT_SECONDS", 0.02)
+
+    async def handle(request):
+        await asyncio.sleep(10)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        with pytest.raises(KalshiError, match="timeout"):
+            await KalshiClient(http).list_markets()
