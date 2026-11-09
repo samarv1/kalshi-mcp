@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling==1.29.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kalshi-mcp"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "httpx==0.28.1",
+    "mcp==2.3.0",
+    "pydantic==2.14.3",
+]
+
+[project.scripts]
+kalshi-mcp = "kalshi_mcp.server:main"
+
+[dependency-groups]
+dev = ["pytest==9.2.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
