@@ -5,7 +5,7 @@ import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 
 from kalshi_mcp.client import KalshiClient
-from kalshi_mcp.tools import get_market, get_series, list_series
+from kalshi_mcp.tools import get_event, get_market, get_series, list_events, list_series
 
 
 pytestmark = pytest.mark.anyio
@@ -198,3 +198,96 @@ async def test_series_request_failures_remain_tool_errors(operation):
                 await get_series("EXAMPLESERIES", client)
             else:
                 await list_series(client)
+
+
+@pytest.mark.parametrize("arguments", [
+    {"series_ticker": "../bad"}, {"tickers": []}, {"tickers": ["../bad"]},
+    {"tickers": ["EXAMPLE"] * 101}, {"tickers": "EXAMPLE"},
+    {"status": "active"}, {"limit": 0}, {"limit": 201}, {"limit": True},
+    {"min_close_ts": -1}, {"min_close_ts": True}, {"min_updated_ts": "123"},
+    {"cursor": 123},
+])
+async def test_invalid_event_filters_never_send_a_request(arguments):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(500)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        with pytest.raises(ToolError, match="invalid_arguments"):
+            await list_events(KalshiClient(http), **arguments)
+    assert requests == []
+
+
+@pytest.mark.parametrize("status", ["unopened", "open", "closed", "settled"])
+async def test_documented_event_status_filters_are_forwarded(status):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"events": [], "cursor": ""})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        result = await list_events(KalshiClient(http), status=status)
+    assert requests[0].url.params["status"] == status
+    assert result.events == []
+
+
+async def test_event_listing_limit_and_ticker_filter_bounds():
+    tickers = [f"EXAMPLE{i}" for i in range(100)]
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"events": [], "cursor": ""})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        await list_events(KalshiClient(http), tickers=tickers, limit=200, cursor="")
+    assert requests[0].url.params["limit"] == "200"
+    assert requests[0].url.params["tickers"] == ",".join(tickers)
+    assert requests[0].url.params["cursor"] == ""
+
+
+async def test_event_detail_missing_metadata_is_null(event, series):
+    for field in ("fee_type_override", "fee_multiplier_override", "settlement_sources", "product_metadata"):
+        del event[field]
+
+    def handle(request):
+        value = {"event": event} if "/events/" in request.url.path else {"series": series}
+        return httpx.Response(200, json=value)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        result = await get_event(event["event_ticker"], KalshiClient(http))
+    data = result.model_dump(mode="json")
+    assert data["event"]["settlement_sources"] is None
+    assert data["event"]["fee_type_override"] is None
+    assert data["event"]["fee_multiplier_override"] is None
+    assert data["series"]["fee_type"] == "quadratic"
+    assert data["series_error"] is None
+
+
+async def test_invalid_event_ticker_never_sends_a_request():
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(500)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        with pytest.raises(ToolError, match="invalid_arguments"):
+            await get_event("../bad", KalshiClient(http))
+    assert requests == []
+
+
+@pytest.mark.parametrize("operation", ["get_event", "list_events"])
+async def test_event_request_failures_remain_tool_errors(operation):
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(500))
+    ) as http:
+        client = KalshiClient(http)
+        with pytest.raises(ToolError, match="upstream_http_error"):
+            if operation == "get_event":
+                await get_event("EXAMPLE", client)
+            else:
+                await list_events(client)

@@ -20,7 +20,7 @@ async def test_lifespan_closes_shared_http_client():
 
 
 # Run the real MCP subprocess with mocked HTTP responses to keep the test offline.
-async def test_stdio_discovery_invocation_errors_and_shutdown(market, series, tmp_path):
+async def test_stdio_discovery_invocation_errors_and_shutdown(market, series, event, tmp_path):
     bootstrap = """
 import json
 import os
@@ -31,6 +31,7 @@ from kalshi_mcp.server import main
 
 market = json.loads(os.environ['TEST_MARKET'])
 series = json.loads(os.environ['TEST_SERIES'])
+event = json.loads(os.environ['TEST_EVENT'])
 def handle(request):
     if request.url.path.endswith('/MISSING'):
         return httpx.Response(404)
@@ -39,6 +40,19 @@ def handle(request):
         return httpx.Response(200, json={'series': [series, {**series, 'ticker': 'SECOND'}]})
     if '/series/' in request.url.path:
         return httpx.Response(200, json={'series': series})
+    if request.url.path.endswith('/events'):
+        assert request.url.params['with_nested_markets'] == 'false'
+        assert request.url.params['series_ticker'] == series['ticker']
+        if request.url.params.get('cursor') == 'EVENT-NEXT':
+            return httpx.Response(200, json={'events': [], 'cursor': ''})
+        return httpx.Response(200, json={'events': [event], 'cursor': 'EVENT-NEXT'})
+    if '/events/' in request.url.path:
+        assert dict(request.url.params) == {'exclude_markets': 'true'}
+        if request.url.path.endswith('/CONTEXTFAIL'):
+            return httpx.Response(200, json={
+                'event': {**event, 'event_ticker': 'CONTEXTFAIL', 'series_ticker': 'MISSING'}
+            })
+        return httpx.Response(200, json={'event': event})
     return httpx.Response(200, json={'market': market})
 
 http = httpx.AsyncClient(transport=httpx.MockTransport(handle))
@@ -49,7 +63,10 @@ print('http_closed=' + str(http.is_closed), file=sys.stderr)
     parameters = StdioServerParameters(
         command=sys.executable,
         args=["-c", bootstrap],
-        env={"TEST_MARKET": json.dumps(market), "TEST_SERIES": json.dumps(series)},
+        env={
+            "TEST_MARKET": json.dumps(market), "TEST_SERIES": json.dumps(series),
+            "TEST_EVENT": json.dumps(event),
+        },
     )
     stderr_path = tmp_path / "server.stderr"
     with stderr_path.open("w") as stderr:
@@ -58,7 +75,9 @@ print('http_closed=' + str(http.is_closed), file=sys.stderr)
                 await session.initialize()
                 discovery = await session.list_tools()
                 tools = {tool.name: tool for tool in discovery.tools}
-                assert set(tools) == {"get_market", "get_series", "list_series"}
+                assert set(tools) == {
+                    "get_market", "get_series", "list_series", "get_event", "list_events",
+                }
                 tool = tools["get_market"]
                 assert tool.description == "Read a market's rules, prices, status, and available settlement data."
                 assert set(tool.input_schema["properties"]) == {"ticker"}
@@ -111,4 +130,39 @@ print('http_closed=' + str(http.is_closed), file=sys.stderr)
                 }
                 bad_limit = await session.call_tool("list_series", {"limit": 201})
                 assert bad_limit.is_error
+
+                events = await session.call_tool(
+                    "list_events", {"series_ticker": series_ticker, "limit": 1}
+                )
+                assert not events.is_error
+                assert events.structured_content["next_cursor"] == "EVENT-NEXT"
+                assert events.structured_content["pagination_mode"] == "upstream"
+                assert events.structured_content["markets_included"] is False
+                event_ticker = events.structured_content["events"][0]["event_ticker"]
+
+                final_page = await session.call_tool("list_events", {
+                    "series_ticker": series_ticker, "cursor": events.structured_content["next_cursor"],
+                    "limit": 1,
+                })
+                assert not final_page.is_error
+                assert final_page.structured_content["events"] == []
+                assert final_page.structured_content["next_cursor"] is None
+
+                event_detail = await session.call_tool("get_event", {"event_ticker": event_ticker})
+                assert not event_detail.is_error
+                assert event_detail.structured_content["series"]["ticker"] == series_ticker
+                assert event_detail.structured_content["series_error"] is None
+                assert event_detail.structured_content["event"]["fee_type_override"] == "flat"
+                assert event_detail.structured_content["series"]["fee_type"] == "quadratic"
+
+                partial = await session.call_tool("get_event", {"event_ticker": "CONTEXTFAIL"})
+                assert not partial.is_error
+                assert partial.structured_content["event"]["event_ticker"] == "CONTEXTFAIL"
+                assert partial.structured_content["series"] is None
+                assert partial.structured_content["series_error"]["code"] == "not_found"
+                missing_event = await session.call_tool("get_event", {"event_ticker": "MISSING"})
+                assert missing_event.is_error
+                bad_status = await session.call_tool("list_events", {"status": "active"})
+                assert bad_status.is_error
+                assert set(tools["get_event"].input_schema["properties"]) == {"event_ticker"}
     assert "http_closed=True" in stderr_path.read_text()

@@ -41,3 +41,21 @@ def series():
         "additional_prohibitions": ["Example restriction"],
         "last_updated_ts": "2026-11-08T12:00:00Z",
     }
+
+
+@pytest.fixture
+def event(series):
+    return {
+        "event_ticker": "EXAMPLESERIES-26NOV09",
+        "series_ticker": series["ticker"],
+        "title": "November example report",
+        "sub_title": "November 2026",
+        "strike_date": "2026-11-09T12:00:00Z",
+        "mutually_exclusive": True,
+        "collateral_return_type": "MECNET",
+        "settlement_sources": [{"name": "Event Agency", "url": "https://example.com/report"}],
+        "fee_type_override": "flat",
+        "fee_multiplier_override": 0.5,
+        "last_updated_ts": "2026-11-08T12:00:00Z",
+        "product_metadata": {"report": "monthly"},
+    }

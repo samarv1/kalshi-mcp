@@ -346,3 +346,196 @@ async def test_series_tools_keep_the_tool_deadline(operation, monkeypatch):
                 await client.get_series("EXAMPLESERIES")
             else:
                 await client.list_series()
+
+
+async def test_event_detail_retrieves_bounded_parent_context(event, series):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        if "/events/" in request.url.path:
+            return httpx.Response(200, json={"event": event})
+        return httpx.Response(200, json={"series": series})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        result = await KalshiClient(http).get_event(event["event_ticker"])
+    assert len(requests) == 2
+    assert requests[0].url.path == f"/trade-api/v2/events/{event['event_ticker']}"
+    assert dict(requests[0].url.params) == {"exclude_markets": "true"}
+    assert requests[1].url.path == f"/trade-api/v2/series/{series['ticker']}"
+    assert result.event.event_ticker == event["event_ticker"]
+    assert result.event.fee_type_override == "flat"
+    assert result.event.fee_multiplier_override == 0.5
+    assert result.event.settlement_sources[0].name == "Event Agency"
+    assert result.event.mutually_exclusive is True
+    assert result.event.collateral_return_type == "MECNET"
+    assert result.event.product_metadata == {"report": "monthly"}
+    assert result.series.contract_terms_url == series["contract_terms_url"]
+    assert result.series.fee_type == "quadratic"
+    assert result.series.fee_multiplier == 1.0
+    assert result.retrieved_at <= result.series_retrieved_at <= datetime.now(UTC)
+    assert result.series_error is None
+    assert result.markets_included is False
+
+
+@pytest.mark.parametrize("failure", [404, 500, 503, 429, "invalid_response", "wrong_ticker", "timeout"])
+async def test_parent_series_failures_preserve_the_event(event, series, failure):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        if "/events/" in request.url.path:
+            return httpx.Response(200, json={"event": event})
+        if failure == "timeout":
+            raise httpx.ReadTimeout("temporary failure", request=request)
+        if failure == "invalid_response":
+            return httpx.Response(200, json={"series": {}})
+        if failure == "wrong_ticker":
+            return httpx.Response(200, json={"series": {**series, "ticker": "OTHER"}})
+        return httpx.Response(failure, headers={"Retry-After": "3600" if failure == 429 else "0"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        result = await KalshiClient(http).get_event(event["event_ticker"])
+    assert result.event.event_ticker == event["event_ticker"]
+    assert result.series is None
+    assert result.series_retrieved_at is None
+    expected_code = {
+        404: "not_found", 500: "upstream_http_error", 503: "upstream_http_error",
+        429: "rate_limited", "invalid_response": "invalid_response",
+        "wrong_ticker": "invalid_response", "timeout": "timeout",
+    }[failure]
+    assert result.series_error.code == expected_code
+    assert len(requests) == (3 if failure in {503, "timeout"} else 2)
+
+
+@pytest.mark.parametrize("status", [404, 500])
+async def test_event_request_failure_does_not_request_parent_series(status):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(status)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        with pytest.raises(KalshiError) as error:
+            await KalshiClient(http).get_event("MISSING")
+    assert error.value.status_code == status
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("mutation", ["wrong_ticker", "missing_series", "unsafe_series", "bad_fee"])
+async def test_malformed_event_detail_stops_before_parent_lookup(event, mutation):
+    if mutation == "wrong_ticker":
+        event["event_ticker"] = "OTHER"
+    elif mutation == "missing_series":
+        del event["series_ticker"]
+    elif mutation == "unsafe_series":
+        event["series_ticker"] = ".."
+    else:
+        event["fee_multiplier_override"] = "free"
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"event": event})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        with pytest.raises(KalshiError, match="invalid_response"):
+            await KalshiClient(http).get_event("EXAMPLESERIES-26NOV09")
+    assert len(requests) == 1
+
+
+async def test_parent_lookup_shares_event_deadline(event, monkeypatch):
+    monkeypatch.setattr(client_module, "TOOL_TIMEOUT_SECONDS", 0.03)
+    parent_cancelled = asyncio.Event()
+
+    async def handle(request):
+        if "/events/" in request.url.path:
+            return httpx.Response(200, json={"event": event})
+        try:
+            await asyncio.sleep(10)
+        finally:
+            parent_cancelled.set()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        result = await KalshiClient(http).get_event(event["event_ticker"])
+    assert result.event.event_ticker == event["event_ticker"]
+    assert result.series_error.code == "timeout"
+    assert parent_cancelled.is_set()
+
+
+@pytest.mark.parametrize("operation", ["get_event", "list_events"])
+async def test_event_request_timeout_is_an_error(operation, monkeypatch):
+    monkeypatch.setattr(client_module, "TOOL_TIMEOUT_SECONDS", 0.02)
+
+    async def handle(request):
+        await asyncio.sleep(10)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        client = KalshiClient(http)
+        with pytest.raises(KalshiError, match="timeout"):
+            if operation == "get_event":
+                await client.get_event("EXAMPLE")
+            else:
+                await client.list_events()
+
+
+async def test_event_listing_forwards_filters_and_one_cursor_page(event):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"events": [event], "cursor": "next+/="})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        result = await KalshiClient(http).list_events(
+            series_ticker=event["series_ticker"], tickers=[event["event_ticker"], "OTHER"],
+            status="open", min_close_ts=0, min_updated_ts=123, limit=1, cursor="previous+/=",
+        )
+    assert len(requests) == 1
+    assert dict(requests[0].url.params) == {
+        "series_ticker": event["series_ticker"], "tickers": f"{event['event_ticker']},OTHER",
+        "status": "open", "min_close_ts": "0", "min_updated_ts": "123", "limit": "1",
+        "cursor": "previous+/=", "with_nested_markets": "false",
+    }
+    assert result.next_cursor == "next+/="
+    assert result.truncated
+    assert result.pagination_mode == "upstream"
+    assert result.markets_included is False
+    assert result.events[0].event_ticker == event["event_ticker"]
+    assert "settlement_sources" not in result.events[0].model_dump()
+
+
+@pytest.mark.parametrize("cursor", ["", "next"])
+async def test_empty_event_page_preserves_continuation(cursor):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"events": [], "cursor": cursor})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        result = await KalshiClient(http).list_events()
+    assert result.events == []
+    assert result.next_cursor == (cursor or None)
+    assert result.truncated is bool(cursor)
+    assert dict(requests[0].url.params) == {"limit": "50", "with_nested_markets": "false"}
+
+
+@pytest.mark.parametrize("body", [{}, {"events": [], "cursor": None}, {"events": [{}], "cursor": ""}])
+async def test_malformed_event_listing_is_an_error(body):
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body))
+    ) as http:
+        with pytest.raises(KalshiError, match="invalid_response"):
+            await KalshiClient(http).list_events()
+
+
+async def test_event_page_exceeding_requested_limit_is_an_error(event):
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(
+            200, json={"events": [event, {**event, "event_ticker": "OTHER"}], "cursor": "next"}
+        ))
+    ) as http:
+        with pytest.raises(KalshiError, match="invalid_response"):
+            await KalshiClient(http).list_events(limit=1)

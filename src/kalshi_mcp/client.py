@@ -8,8 +8,13 @@ import httpx
 from pydantic import BaseModel, ValidationError
 
 from kalshi_mcp.models import (
+    EventListPayload,
+    EventListResponse,
+    EventPayload,
+    EventResponse,
     MarketPayload,
     MarketResponse,
+    SeriesContextError,
     SeriesListPayload,
     SeriesListResponse,
     SeriesPayload,
@@ -92,16 +97,20 @@ class KalshiClient:
     async def get_series(self, series_ticker: str) -> SeriesResponse:
         try:
             async with asyncio.timeout(TOOL_TIMEOUT_SECONDS) as deadline:
-                payload, retrieved_at = await self._read_payload(
-                    f"/series/{quote(series_ticker, safe='')}", "live", deadline, SeriesPayload
-                )
-                if payload.series.ticker != series_ticker:
-                    raise KalshiError("invalid_response", "live")
-                return SeriesResponse(
-                    source="live", retrieved_at=retrieved_at, series=payload.series
-                )
+                return await self._read_series(series_ticker, deadline)
         except TimeoutError as exc:
             raise KalshiError("timeout", "live") from exc
+
+    # Reuse the caller's deadline when series metadata is part of an event lookup.
+    async def _read_series(
+        self, series_ticker: str, deadline: asyncio.Timeout
+    ) -> SeriesResponse:
+        payload, retrieved_at = await self._read_payload(
+            f"/series/{quote(series_ticker, safe='')}", "live", deadline, SeriesPayload
+        )
+        if payload.series.ticker != series_ticker:
+            raise KalshiError("invalid_response", "live")
+        return SeriesResponse(source="live", retrieved_at=retrieved_at, series=payload.series)
 
     # Forward the supported filters exactly, including their case. The API has no cursor.
     async def list_series(
@@ -122,6 +131,85 @@ class KalshiClient:
                     retrieved_at=retrieved_at,
                     series=payload.series,
                     total_count=len(payload.series),
+                )
+        except TimeoutError as exc:
+            raise KalshiError("timeout", "live") from exc
+
+    # Keep the event available if its parent lookup fails, sharing one total deadline.
+    async def get_event(self, event_ticker: str) -> EventResponse:
+        result: EventResponse | None = None
+        try:
+            async with asyncio.timeout(TOOL_TIMEOUT_SECONDS) as deadline:
+                payload, retrieved_at = await self._read_payload(
+                    f"/events/{quote(event_ticker, safe='')}",
+                    "live",
+                    deadline,
+                    EventPayload,
+                    {"exclude_markets": "true"},
+                )
+                if payload.event.event_ticker != event_ticker:
+                    raise KalshiError("invalid_response", "live")
+                result = EventResponse(
+                    source="live", retrieved_at=retrieved_at, event=payload.event
+                )
+                try:
+                    parent = await self._read_series(payload.event.series_ticker, deadline)
+                except KalshiError as exc:
+                    return result.model_copy(
+                        update={
+                            "series_error": SeriesContextError(
+                                code=exc.code, status_code=exc.status_code
+                            )
+                        }
+                    )
+                return result.model_copy(
+                    update={
+                        "series": parent.series,
+                        "series_retrieved_at": parent.retrieved_at,
+                    }
+                )
+        except TimeoutError as exc:
+            if result is None:
+                raise KalshiError("timeout", "live") from exc
+            return result.model_copy(update={"series_error": SeriesContextError(code="timeout")})
+
+    # Return exactly one upstream page and its cursor, excluding child markets.
+    async def list_events(
+        self,
+        *,
+        series_ticker: str | None = None,
+        tickers: list[str] | None = None,
+        status: str | None = None,
+        min_close_ts: int | None = None,
+        min_updated_ts: int | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> EventListResponse:
+        filters = {
+            "series_ticker": series_ticker,
+            "status": status,
+            "min_close_ts": min_close_ts,
+            "min_updated_ts": min_updated_ts,
+            "limit": limit,
+            "cursor": cursor,
+        }
+        params = {key: str(value) for key, value in filters.items() if value is not None}
+        params["with_nested_markets"] = "false"
+        if tickers is not None:
+            params["tickers"] = ",".join(tickers)
+        try:
+            async with asyncio.timeout(TOOL_TIMEOUT_SECONDS) as deadline:
+                payload, retrieved_at = await self._read_payload(
+                    "/events", "live", deadline, EventListPayload, params
+                )
+                if len(payload.events) > limit:
+                    raise KalshiError("invalid_response", "live")
+                return EventListResponse(
+                    source="live",
+                    retrieved_at=retrieved_at,
+                    events=payload.events,
+                    next_cursor=payload.cursor or None,
+                    truncated=bool(payload.cursor),
                 )
         except TimeoutError as exc:
             raise KalshiError("timeout", "live") from exc

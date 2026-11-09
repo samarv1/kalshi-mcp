@@ -5,6 +5,10 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, StringConstraints
 
 
 Source = Literal["live", "historical"]
+Ticker = Annotated[
+    str,
+    StringConstraints(strict=True, min_length=1, max_length=200, pattern=r"^[A-Za-z0-9_-]+$"),
+]
 NonEmptyString = Annotated[str, StringConstraints(min_length=1)]
 DecimalString = Annotated[str, StringConstraints(pattern=r"^[0-9]+(?:\.[0-9]+)?$")]
 
@@ -142,3 +146,69 @@ class SeriesListResponse(BaseModel):
     pagination_supported: Literal[True] = True
     pagination_mode: Literal["local"] = "local"
     next_cursor: str | None = None
+
+
+class EventSummary(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    event_ticker: NonEmptyString
+    series_ticker: Ticker
+    title: str
+    sub_title: str | None = None
+    strike_date: AwareDatetime | None = None
+    strike_period: str | None = None
+
+
+# Preserve fee overrides separately from series defaults.
+# mutually_exclusive=true means at most one child market can resolve YES.
+class Event(EventSummary):
+    model_config = ConfigDict(strict=True, allow_inf_nan=False)
+
+    mutually_exclusive: bool | None = None
+    collateral_return_type: str | None = None
+    settlement_sources: list[SettlementSource] | None = None
+    fee_type_override: str | None = None
+    fee_multiplier_override: float | None = None
+    last_updated_ts: AwareDatetime | None = None
+    product_metadata: dict[str, Any] | None = None
+
+
+class EventPayload(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    event: Event
+
+
+class EventListPayload(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    events: list[EventSummary]
+    cursor: str
+
+
+class SeriesContextError(BaseModel):
+    code: str
+    source: Literal["live"] = "live"
+    status_code: int | None = None
+
+
+# Event and parent-series timestamps describe separate reads within one tool call.
+class EventResponse(BaseModel):
+    source: Literal["live"]
+    retrieved_at: datetime
+    event: Event
+    series: Series | None = None
+    series_retrieved_at: datetime | None = None
+    series_error: SeriesContextError | None = None
+    markets_included: Literal[False] = False
+
+
+class EventListResponse(BaseModel):
+    source: Literal["live"]
+    retrieved_at: datetime
+    events: list[EventSummary]
+    next_cursor: str | None
+    truncated: bool
+    pagination_supported: Literal[True] = True
+    pagination_mode: Literal["upstream"] = "upstream"
+    markets_included: Literal[False] = False

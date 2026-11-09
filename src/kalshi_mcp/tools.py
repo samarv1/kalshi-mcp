@@ -1,19 +1,26 @@
 import json
-from typing import Annotated
+from typing import Annotated, Literal
 
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 from kalshi_mcp.client import KalshiClient, KalshiError
-from kalshi_mcp.models import MarketResponse, SeriesListResponse, SeriesResponse
+from kalshi_mcp.models import (
+    EventListResponse,
+    EventResponse,
+    MarketResponse,
+    SeriesListResponse,
+    SeriesResponse,
+    Ticker,
+)
 
 
-Ticker = Annotated[
-    str,
-    StringConstraints(strict=True, min_length=1, max_length=200, pattern=r"^[A-Za-z0-9_-]+$"),
-]
 SeriesFilter = Annotated[str, StringConstraints(strict=True, min_length=1, pattern=r"\S")]
 ListingLimit = Annotated[int, Field(strict=True, ge=1, le=200)]
+EventTickers = Annotated[list[Ticker], Field(min_length=1, max_length=100)]
+EventStatus = Literal["unopened", "open", "closed", "settled"]
+UnixTimestamp = Annotated[int, Field(strict=True, ge=0)]
+Cursor = Annotated[str, StringConstraints(strict=True)]
 
 
 class GetMarketArguments(BaseModel):
@@ -35,6 +42,24 @@ class ListSeriesArguments(BaseModel):
     tags: SeriesFilter | None = None
     limit: ListingLimit = 50
     after_ticker: Ticker | None = None
+
+
+class GetEventArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_ticker: Ticker
+
+
+class ListEventsArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    series_ticker: Ticker | None = None
+    tickers: EventTickers | None = None
+    status: EventStatus | None = None
+    min_close_ts: UnixTimestamp | None = None
+    min_updated_ts: UnixTimestamp | None = None
+    limit: ListingLimit = 50
+    cursor: Cursor | None = None
 
 
 def _invalid_arguments(exc: ValidationError) -> ToolError:
@@ -105,3 +130,45 @@ async def list_series(
             "next_cursor": page[-1].ticker if has_more else None,
         }
     )
+
+
+# Validate the event ticker and expose parent-series failures within the event response.
+async def get_event(event_ticker: str, client: KalshiClient) -> EventResponse:
+    try:
+        arguments = GetEventArguments(event_ticker=event_ticker)
+    except ValidationError as exc:
+        raise _invalid_arguments(exc) from exc
+    try:
+        return await client.get_event(arguments.event_ticker)
+    except KalshiError as exc:
+        raise _upstream_error(exc) from exc
+
+
+# Timestamps are Unix seconds. Opaque cursors are forwarded without interpretation.
+async def list_events(
+    client: KalshiClient,
+    *,
+    series_ticker: str | None = None,
+    tickers: list[str] | None = None,
+    status: str | None = None,
+    min_close_ts: int | None = None,
+    min_updated_ts: int | None = None,
+    limit: int = 50,
+    cursor: str | None = None,
+) -> EventListResponse:
+    try:
+        arguments = ListEventsArguments(
+            series_ticker=series_ticker,
+            tickers=tickers,
+            status=status,
+            min_close_ts=min_close_ts,
+            min_updated_ts=min_updated_ts,
+            limit=limit,
+            cursor=cursor,
+        )
+    except ValidationError as exc:
+        raise _invalid_arguments(exc) from exc
+    try:
+        return await client.list_events(**arguments.model_dump())
+    except KalshiError as exc:
+        raise _upstream_error(exc) from exc
