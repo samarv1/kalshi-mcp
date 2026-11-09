@@ -2,10 +2,6 @@
 
 A local Python MCP server that lets trading agents find Kalshi markets, read contract rules, check order books, and retrieve settlement data.
 
-This is an independent project, not an official Kalshi product.
-
-The server supplies exchange information. The agent handles research, forecasts, trading decisions, paper accounting, and risk limits.
-
 ## Setup
 
 TBD.
@@ -88,10 +84,10 @@ Read-only market data only. No order placement, portfolio access, paper trading,
 - [Event fee overrides](https://docs.kalshi.com/api-reference/events/get-event-fee-changes)
 - [Kalshi SDK and API specification guidance](https://docs.kalshi.com/sdks/overview)
 
-<a name="key-terms"></a>
+## Key terms
 
 <details>
-<summary>Key terms</summary>
+<summary>Definitions</summary>
 
 | Term | Meaning |
 | --- | --- |
