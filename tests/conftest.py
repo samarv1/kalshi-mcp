@@ -22,3 +22,22 @@ def market():
         "volume_fp": "123.50",
         "updated_time": "2026-11-08T12:00:00Z",
     }
+
+
+@pytest.fixture
+def series():
+    return {
+        "ticker": "EXAMPLESERIES",
+        "title": "Monthly example report",
+        "frequency": "monthly",
+        "category": "Economics",
+        "categories": ["Economics", "Climate"],
+        "tags": ["Inflation"],
+        "contract_url": "https://example.com/filing.pdf",
+        "contract_terms_url": "https://example.com/terms.pdf",
+        "settlement_sources": [{"name": "Example Agency", "url": "https://example.com/data"}],
+        "fee_type": "quadratic",
+        "fee_multiplier": 1.0,
+        "additional_prohibitions": ["Example restriction"],
+        "last_updated_ts": "2026-11-08T12:00:00Z",
+    }

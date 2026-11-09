@@ -12,7 +12,7 @@ TBD.
 
 ## Tools
 
-Kalshi groups markets into **series** (recurring event types) and **events** (specific occurrences). Each series, event, and market has a ticker used to look it up.
+Kalshi groups markets into **series** (recurring event types) and **events** (specific occurrences). Each series, event, and market has a ticker used to look it up. For definitions of these terms, see [Key terms](#key-terms).
 
 | Tool | What it does |
 | --- | --- |
@@ -87,3 +87,24 @@ Read-only market data only. No order placement, portfolio access, paper trading,
 - [Historical data routing](https://docs.kalshi.com/getting_started/historical_data)
 - [Event fee overrides](https://docs.kalshi.com/api-reference/events/get-event-fee-changes)
 - [Kalshi SDK and API specification guidance](https://docs.kalshi.com/sdks/overview)
+
+<a name="key-terms"></a>
+
+<details>
+<summary>Key terms</summary>
+
+| Term | Meaning |
+| --- | --- |
+| **Series** | A group of events that share a contract structure and rules, such as monthly inflation reports. |
+| **Event** | A specific occurrence, such as November's inflation report. |
+| **Market** | A specific question within an event, such as whether inflation exceeds 3%. |
+| **Contract** | A tradable unit whose final payout depends on the market's outcome. |
+| **YES / NO** | The two sides of a binary market. YES corresponds to the stated condition occurring. NO corresponds to it failing to occur. |
+| **Ticker** | The unique identifier used to look up a series, event, or market. |
+| **Bid / ask** | A bid is a price someone offers to pay. An ask is a price someone offers to sell for. |
+| **Order book** | The waiting buy or sell orders, grouped by price and quantity. Kalshi's API represents these using YES and NO bids. |
+| **Liquidity** | The quantity available to trade at different prices. |
+| **Settlement** | The exchange finalizes the market's result and payout. Closing trading and settling can happen at different times. |
+| **Fee** | A charge for trading. Series fee metadata describes defaults, and event-specific rules can override them. |
+
+</details>

@@ -5,9 +5,17 @@ from email.utils import parsedate_to_datetime
 from urllib.parse import quote
 
 import httpx
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
-from kalshi_mcp.models import MarketPayload, MarketResponse, Source
+from kalshi_mcp.models import (
+    MarketPayload,
+    MarketResponse,
+    SeriesListPayload,
+    SeriesListResponse,
+    SeriesPayload,
+    SeriesResponse,
+    Source,
+)
 
 
 BASE_URL = "https://external-api.kalshi.com/trade-api/v2"
@@ -63,19 +71,14 @@ class KalshiClient:
             async with asyncio.timeout(TOOL_TIMEOUT_SECONDS) as deadline:
                 for source, prefix in (("live", "markets"), ("historical", "historical/markets")):
                     try:
-                        response = await self._request(
-                            f"/{prefix}/{quote(ticker, safe='')}", source, deadline
+                        payload, retrieved_at = await self._read_payload(
+                            f"/{prefix}/{quote(ticker, safe='')}", source, deadline, MarketPayload
                         )
                     except KalshiError as exc:
                         if exc.code == "not_found" and source == "live":
                             continue
                         raise
 
-                    retrieved_at = datetime.now(UTC)
-                    try:
-                        payload = MarketPayload.model_validate_json(response.content)
-                    except ValidationError as exc:
-                        raise KalshiError("invalid_response", source) from exc
                     if payload.market.ticker != ticker:
                         raise KalshiError("invalid_response", source)
                     return MarketResponse(
@@ -85,17 +88,75 @@ class KalshiClient:
             raise KalshiError("timeout", source) from exc
         raise KalshiError("not_found", source)
 
+    # Fetch and validate a series' contract and settlement metadata.
+    async def get_series(self, series_ticker: str) -> SeriesResponse:
+        try:
+            async with asyncio.timeout(TOOL_TIMEOUT_SECONDS) as deadline:
+                payload, retrieved_at = await self._read_payload(
+                    f"/series/{quote(series_ticker, safe='')}", "live", deadline, SeriesPayload
+                )
+                if payload.series.ticker != series_ticker:
+                    raise KalshiError("invalid_response", "live")
+                return SeriesResponse(
+                    source="live", retrieved_at=retrieved_at, series=payload.series
+                )
+        except TimeoutError as exc:
+            raise KalshiError("timeout", "live") from exc
+
+    # Forward the supported filters exactly, including their case. The API has no cursor.
+    async def list_series(
+        self, category: str | None = None, tags: str | None = None
+    ) -> SeriesListResponse:
+        params = {
+            key: value
+            for key, value in {"category": category, "tags": tags}.items()
+            if value is not None
+        }
+        try:
+            async with asyncio.timeout(TOOL_TIMEOUT_SECONDS) as deadline:
+                payload, retrieved_at = await self._read_payload(
+                    "/series", "live", deadline, SeriesListPayload, params
+                )
+                return SeriesListResponse(
+                    source="live",
+                    retrieved_at=retrieved_at,
+                    series=payload.series,
+                    total_count=len(payload.series),
+                )
+        except TimeoutError as exc:
+            raise KalshiError("timeout", "live") from exc
+
+    # Validate the endpoint's JSON envelope and record receipt time before validation.
+    async def _read_payload[Payload: BaseModel](
+        self,
+        path: str,
+        source: Source,
+        deadline: asyncio.Timeout,
+        payload_type: type[Payload],
+        params: dict[str, str] | None = None,
+    ) -> tuple[Payload, datetime]:
+        response = await self._request(path, source, deadline, params)
+        retrieved_at = datetime.now(UTC)
+        try:
+            return payload_type.model_validate_json(response.content), retrieved_at
+        except ValidationError as exc:
+            raise KalshiError("invalid_response", source) from exc
+
     # Retry temporary GET failures once within the caller's deadline.
     # Acquire capacity per attempt so retry waits do not block other requests.
     async def _request(
-        self, path: str, source: Source, deadline: asyncio.Timeout
+        self,
+        path: str,
+        source: Source,
+        deadline: asyncio.Timeout,
+        params: dict[str, str] | None = None,
     ) -> httpx.Response:
         for attempt in range(2):
             try:
                 async with self._semaphore:
                     async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
                         response = await self.http.get(
-                            f"{BASE_URL}{path}", timeout=REQUEST_TIMEOUT_SECONDS
+                            f"{BASE_URL}{path}", params=params, timeout=REQUEST_TIMEOUT_SECONDS
                         )
             except (TimeoutError, httpx.TimeoutException) as exc:
                 if attempt == 1:

@@ -20,7 +20,7 @@ async def test_lifespan_closes_shared_http_client():
 
 
 # Run the real MCP subprocess with mocked HTTP responses to keep the test offline.
-async def test_stdio_discovery_invocation_errors_and_shutdown(market, tmp_path):
+async def test_stdio_discovery_invocation_errors_and_shutdown(market, series, tmp_path):
     bootstrap = """
 import json
 import os
@@ -30,9 +30,15 @@ import httpx
 from kalshi_mcp.server import main
 
 market = json.loads(os.environ['TEST_MARKET'])
+series = json.loads(os.environ['TEST_SERIES'])
 def handle(request):
     if request.url.path.endswith('/MISSING'):
         return httpx.Response(404)
+    if request.url.path.endswith('/series'):
+        assert dict(request.url.params) == {'category': 'Economics', 'tags': 'Inflation'}
+        return httpx.Response(200, json={'series': [series, {**series, 'ticker': 'SECOND'}]})
+    if '/series/' in request.url.path:
+        return httpx.Response(200, json={'series': series})
     return httpx.Response(200, json={'market': market})
 
 http = httpx.AsyncClient(transport=httpx.MockTransport(handle))
@@ -43,7 +49,7 @@ print('http_closed=' + str(http.is_closed), file=sys.stderr)
     parameters = StdioServerParameters(
         command=sys.executable,
         args=["-c", bootstrap],
-        env={"TEST_MARKET": json.dumps(market)},
+        env={"TEST_MARKET": json.dumps(market), "TEST_SERIES": json.dumps(series)},
     )
     stderr_path = tmp_path / "server.stderr"
     with stderr_path.open("w") as stderr:
@@ -51,8 +57,9 @@ print('http_closed=' + str(http.is_closed), file=sys.stderr)
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 discovery = await session.list_tools()
-                assert [tool.name for tool in discovery.tools] == ["get_market"]
-                tool = discovery.tools[0]
+                tools = {tool.name: tool for tool in discovery.tools}
+                assert set(tools) == {"get_market", "get_series", "list_series"}
+                tool = tools["get_market"]
                 assert tool.description == "Read a market's rules, prices, status, and available settlement data."
                 assert set(tool.input_schema["properties"]) == {"ticker"}
                 assert tool.annotations.read_only_hint is True
@@ -71,4 +78,37 @@ print('http_closed=' + str(http.is_closed), file=sys.stderr)
                 assert invalid.is_error
                 absent = await session.call_tool("get_market", {})
                 assert absent.is_error
+
+                listing = await session.call_tool(
+                    "list_series", {"category": "Economics", "tags": "Inflation", "limit": 1}
+                )
+                assert not listing.is_error
+                assert listing.structured_content["total_count"] == 2
+                assert listing.structured_content["truncated"] is True
+                assert listing.structured_content["next_cursor"] == series["ticker"]
+                assert listing.structured_content["pagination_mode"] == "local"
+                assert len(listing.structured_content["series"]) == 1
+                series_ticker = listing.structured_content["series"][0]["ticker"]
+
+                continuation = await session.call_tool(
+                    "list_series", {
+                        "category": "Economics", "tags": "Inflation", "limit": 1,
+                        "after_ticker": listing.structured_content["next_cursor"],
+                    }
+                )
+                assert not continuation.is_error
+                assert continuation.structured_content["series"][0]["ticker"] == "SECOND"
+                assert continuation.structured_content["next_cursor"] is None
+                assert continuation.structured_content["truncated"] is False
+
+                detail = await session.call_tool("get_series", {"series_ticker": series_ticker})
+                assert not detail.is_error
+                assert detail.structured_content["series"]["contract_url"] == series["contract_url"]
+                assert detail.structured_content["series"]["fee_type"] == series["fee_type"]
+                assert set(tools["get_series"].input_schema["properties"]) == {"series_ticker"}
+                assert set(tools["list_series"].input_schema["properties"]) == {
+                    "category", "tags", "limit", "after_ticker",
+                }
+                bad_limit = await session.call_tool("list_series", {"limit": 201})
+                assert bad_limit.is_error
     assert "http_closed=True" in stderr_path.read_text()

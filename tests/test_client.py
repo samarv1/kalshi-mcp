@@ -203,3 +203,146 @@ async def test_concurrency_bound(market):
         client = KalshiClient(http)
         await asyncio.gather(*(client.get_market(market["ticker"]) for _ in range(8)))
     assert peak == 4
+
+
+async def test_series_details_keep_contract_and_settlement_context(series):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"series": series})
+
+    before = datetime.now(UTC)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        result = await KalshiClient(http).get_series(series["ticker"])
+    assert str(requests[0].url) == f"{BASE_URL}/series/{series['ticker']}"
+    assert result.source == "live"
+    assert before <= result.retrieved_at <= datetime.now(UTC)
+    assert result.series.contract_url == series["contract_url"]
+    assert result.series.contract_terms_url == series["contract_terms_url"]
+    assert result.series.settlement_sources[0].name == "Example Agency"
+    assert result.series.settlement_sources[0].url == "https://example.com/data"
+    assert result.series.additional_prohibitions == ["Example restriction"]
+    assert result.series.fee_type == "quadratic"
+    assert result.series.fee_multiplier == 1.0
+    assert result.series.last_updated_ts < result.retrieved_at
+    assert result.series.categories == ["Economics", "Climate"]
+
+
+async def test_series_missing_optional_metadata_is_null(series):
+    for key in ("contract_url", "contract_terms_url", "fee_type", "fee_multiplier", "settlement_sources"):
+        del series[key]
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"series": series}))
+    ) as http:
+        result = await KalshiClient(http).get_series(series["ticker"])
+    data = result.model_dump(mode="json")["series"]
+    assert all(data[key] is None for key in (
+        "contract_url", "contract_terms_url", "fee_type", "fee_multiplier", "settlement_sources",
+    ))
+
+
+async def test_missing_series_has_no_historical_fallback():
+    paths = []
+
+    def handle(request):
+        paths.append(request.url.path)
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        with pytest.raises(KalshiError, match="not_found") as error:
+            await KalshiClient(http).get_series("MISSING")
+    assert paths == ["/trade-api/v2/series/MISSING"]
+    assert error.value.source == "live"
+
+
+async def test_series_listing_forwards_only_supported_filters(series):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"series": [series]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        result = await KalshiClient(http).list_series("Economics", "Inflation,Jobs & Wages")
+    assert requests[0].url.path == "/trade-api/v2/series"
+    assert dict(requests[0].url.params) == {"category": "Economics", "tags": "Inflation,Jobs & Wages"}
+    assert result.total_count == 1
+    assert result.series[0].ticker == series["ticker"]
+    assert result.series[0].categories == ["Economics", "Climate"]
+
+
+async def test_empty_series_listing_is_successful():
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"series": []})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        result = await KalshiClient(http).list_series()
+    assert dict(requests[0].url.params) == {}
+    assert result.series == []
+    assert result.total_count == 0
+
+
+@pytest.mark.parametrize("body", [{}, {"series": None}, {"series": {}}, {"series": [{}]}])
+async def test_malformed_series_listing_is_an_error(body):
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body))
+    ) as http:
+        with pytest.raises(KalshiError, match="invalid_response"):
+            await KalshiClient(http).list_series()
+
+
+@pytest.mark.parametrize("mutation", ["wrong_ticker", "bad_source", "bad_fee"])
+async def test_malformed_series_details_are_an_error(series, mutation):
+    if mutation == "wrong_ticker":
+        series["ticker"] = "OTHER"
+    elif mutation == "bad_source":
+        series["settlement_sources"] = "Example Agency"
+    else:
+        series["fee_multiplier"] = "free"
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"series": series}))
+    ) as http:
+        with pytest.raises(KalshiError, match="invalid_response"):
+            await KalshiClient(http).get_series("EXAMPLESERIES")
+
+
+@pytest.mark.parametrize("operation", ["get_series", "list_series"])
+async def test_series_tools_use_existing_retry_budget(operation, series):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(503, headers={"Retry-After": "0"})
+        value = series if operation == "get_series" else [series]
+        return httpx.Response(200, json={"series": value})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        client = KalshiClient(http)
+        if operation == "get_series":
+            result = await client.get_series(series["ticker"])
+        else:
+            result = await client.list_series()
+    assert result.source == "live"
+    assert len(requests) == 2
+    assert requests[0].url == requests[1].url
+
+
+@pytest.mark.parametrize("operation", ["get_series", "list_series"])
+async def test_series_tools_keep_the_tool_deadline(operation, monkeypatch):
+    monkeypatch.setattr(client_module, "TOOL_TIMEOUT_SECONDS", 0.02)
+
+    async def handle(request):
+        await asyncio.sleep(10)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        client = KalshiClient(http)
+        with pytest.raises(KalshiError, match="timeout"):
+            if operation == "get_series":
+                await client.get_series("EXAMPLESERIES")
+            else:
+                await client.list_series()

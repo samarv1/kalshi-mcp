@@ -81,3 +81,64 @@ class MarketResponse(BaseModel):
     source: Source
     retrieved_at: datetime
     market: Market
+
+
+class SettlementSource(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    name: str | None = None
+    url: str | None = None
+
+
+class SeriesSummary(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    ticker: NonEmptyString
+    title: str
+    frequency: str
+    category: str | None = None
+    categories: list[str] | None = None
+    tags: list[str] | None = None
+
+
+# Fee metadata describes series defaults. Event-specific overrides can take precedence.
+class Series(SeriesSummary):
+    model_config = ConfigDict(strict=True, allow_inf_nan=False)
+
+    contract_url: str | None = None
+    contract_terms_url: str | None = None
+    settlement_sources: list[SettlementSource] | None = None
+    fee_type: str | None = None
+    fee_multiplier: float | None = None
+    additional_prohibitions: list[str] | None = None
+    last_updated_ts: AwareDatetime | None = None
+
+
+class SeriesPayload(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    series: Series
+
+
+class SeriesListPayload(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    series: list[SeriesSummary]
+
+
+class SeriesResponse(BaseModel):
+    source: Literal["live"]
+    retrieved_at: datetime
+    series: Series
+
+
+# Each page is sliced locally from a fresh full upstream response.
+class SeriesListResponse(BaseModel):
+    source: Literal["live"]
+    retrieved_at: datetime
+    series: list[SeriesSummary]
+    total_count: int
+    truncated: bool = False
+    pagination_supported: Literal[True] = True
+    pagination_mode: Literal["local"] = "local"
+    next_cursor: str | None = None
