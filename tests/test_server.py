@@ -19,6 +19,49 @@ async def test_lifespan_closes_shared_http_client():
     assert client.http.is_closed
 
 
+async def test_stdio_rejects_unknown_arguments_before_any_http_request(tmp_path):
+    bootstrap = """
+import sys
+from unittest.mock import patch
+import httpx
+from kalshi_mcp.server import main
+
+requests = []
+def handle(request):
+    requests.append(request)
+    return httpx.Response(500)
+
+http = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+with patch('kalshi_mcp.server.httpx.AsyncClient', return_value=http):
+    main()
+print('http_requests=' + str(len(requests)), file=sys.stderr)
+"""
+    parameters = StdioServerParameters(command=sys.executable, args=["-c", bootstrap])
+    stderr_path = tmp_path / "server.stderr"
+    cases = {
+        "get_market": {"ticker": "EXAMPLE", "unexpected": True},
+        "get_series": {"series_ticker": "EXAMPLE", "unexpected": True},
+        "get_event": {"event_ticker": "EXAMPLE", "unexpected": True},
+        "list_series": {"category": "Economics", "unexpected": True},
+        "list_events": {"series_ticker": "EXAMPLE", "unexpected": True},
+        "list_markets": {"event_ticker": "EXAMPLE", "max_close_time": 0},
+    }
+    with stderr_path.open("w") as stderr:
+        async with stdio_client(parameters, errlog=stderr) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                for name, arguments in cases.items():
+                    result = await session.call_tool(name, arguments)
+                    assert result.is_error, name
+                    assert "invalid_arguments" in result.content[0].text
+                    unknown = "max_close_time" if name == "list_markets" else "unexpected"
+                    assert unknown in result.content[0].text
+                discovery = await session.list_tools()
+                assert {tool.name for tool in discovery.tools} == set(cases)
+                assert all(tool.input_schema["additionalProperties"] is False for tool in discovery.tools)
+    assert "http_requests=0" in stderr_path.read_text()
+
+
 # Run the real MCP subprocess with mocked HTTP responses to keep the test offline.
 async def test_stdio_discovery_invocation_errors_and_shutdown(market, series, event, tmp_path):
     bootstrap = """

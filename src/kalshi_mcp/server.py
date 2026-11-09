@@ -1,10 +1,13 @@
+import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import httpx
 from mcp.server.mcpserver import Context, MCPServer
-from mcp.types import ToolAnnotations
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import CallToolResult, InputRequiredResult, Tool, ToolAnnotations
 
 from kalshi_mcp.client import MAX_CONCURRENT_REQUESTS, KalshiClient
 from kalshi_mcp.models import (
@@ -43,7 +46,37 @@ async def lifespan(server: MCPServer) -> AsyncIterator[KalshiClient]:
         yield KalshiClient(http)
 
 
-mcp = MCPServer("kalshi-mcp", lifespan=lifespan, log_level="WARNING")
+class KalshiMCPServer(MCPServer[KalshiClient]):
+    # Publish the same closed argument contract that call_tool enforces.
+    async def list_tools(self) -> list[Tool]:
+        tools = await super().list_tools()
+        for tool in tools:
+            tool.input_schema["additionalProperties"] = False
+        return tools
+
+    # The SDK drops unknown keys before handler validation, so reject them here.
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: Context[KalshiClient] | None = None,
+    ) -> CallToolResult | InputRequiredResult:
+        for tool in await self.list_tools():
+            if tool.name == name:
+                unknown = sorted(set(arguments) - set(tool.input_schema.get("properties", {})))
+                if unknown:
+                    raise ToolError(
+                        json.dumps({
+                            "code": "invalid_arguments",
+                            "fields": unknown,
+                            "reason": "Unknown tool arguments.",
+                        })
+                    )
+                break
+        return await super().call_tool(name, arguments, context)
+
+
+mcp = KalshiMCPServer("kalshi-mcp", lifespan=lifespan, log_level="WARNING")
 
 
 @mcp.tool(
