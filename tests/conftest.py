@@ -1,6 +1,7 @@
 import pytest
 
 
+# The client uses asyncio deadlines and semaphores, so tests use the asyncio backend.
 @pytest.fixture
 def anyio_backend():
     return "asyncio"

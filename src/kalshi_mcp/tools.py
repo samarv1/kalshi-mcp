@@ -20,8 +20,8 @@ class GetMarketArguments(BaseModel):
     ticker: Ticker
 
 
+# Validate tool input and translate upstream failures into MCP tool errors.
 async def get_market(ticker: str, client: KalshiClient) -> MarketResponse:
-    """Validate tool input and translate upstream failures into MCP tool errors."""
     try:
         arguments = GetMarketArguments(ticker=ticker)
     except ValidationError as exc:

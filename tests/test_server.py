@@ -19,6 +19,7 @@ async def test_lifespan_closes_shared_http_client():
     assert client.http.is_closed
 
 
+# Run the real MCP subprocess with mocked HTTP responses to keep the test offline.
 async def test_stdio_discovery_invocation_errors_and_shutdown(market, tmp_path):
     bootstrap = """
 import json
@@ -52,6 +53,7 @@ print('http_closed=' + str(http.is_closed), file=sys.stderr)
                 discovery = await session.list_tools()
                 assert [tool.name for tool in discovery.tools] == ["get_market"]
                 tool = discovery.tools[0]
+                assert tool.description == "Read a market's rules, prices, status, and available settlement data."
                 assert set(tool.input_schema["properties"]) == {"ticker"}
                 assert tool.annotations.read_only_hint is True
                 assert tool.output_schema is not None

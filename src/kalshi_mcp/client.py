@@ -17,9 +17,8 @@ MAX_CONCURRENT_REQUESTS = 4
 RETRYABLE_STATUSES = {429, 502, 503, 504}
 
 
+# Classify upstream failures without exposing upstream response bodies.
 class KalshiError(Exception):
-    """Classify upstream failures without exposing upstream response bodies."""
-
     def __init__(
         self,
         code: str,
@@ -32,8 +31,9 @@ class KalshiError(Exception):
         self.status_code = status_code
 
 
+# Retry-After accepts seconds or an HTTP date. Return a nonnegative delay in seconds,
+# defaulting to 0.5 when the header is missing or invalid.
 def retry_delay(response: httpx.Response) -> float:
-    """Return a nonnegative delay in seconds, defaulting to 0.5 for unusable Retry-After."""
     value = response.headers.get("Retry-After")
     if value is None:
         return 0.5
@@ -55,9 +55,9 @@ class KalshiClient:
         self.http = http
         self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
+    # Fetch and validate live or historical market data under one deadline.
     # Only a live 404 permits historical lookup. Temporary failures retain their error.
     async def get_market(self, ticker: str) -> MarketResponse:
-        """Fetch and validate a market, recording its source and retrieval time."""
         source: Source = "live"
         try:
             async with asyncio.timeout(TOOL_TIMEOUT_SECONDS) as deadline:
@@ -85,10 +85,11 @@ class KalshiClient:
             raise KalshiError("timeout", source) from exc
         raise KalshiError("not_found", source)
 
+    # Retry temporary GET failures once within the caller's deadline.
+    # Acquire capacity per attempt so retry waits do not block other requests.
     async def _request(
         self, path: str, source: Source, deadline: asyncio.Timeout
     ) -> httpx.Response:
-        """Retry temporary GET failures once within the caller's deadline."""
         for attempt in range(2):
             try:
                 async with self._semaphore:

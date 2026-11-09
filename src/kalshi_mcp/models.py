@@ -17,9 +17,9 @@ class PriceRange(BaseModel):
     step: DecimalString
 
 
+# Dollar fields use USD strings and *_fp fields use contract-count strings.
+# Preserve their precision and keep unavailable optional values distinct from zero.
 class Market(BaseModel):
-    """Validate exchange fields while preserving decimal strings and missing optional values."""
-
     model_config = ConfigDict(strict=True)
 
     ticker: NonEmptyString
@@ -76,9 +76,8 @@ class MarketPayload(BaseModel):
     market: Market
 
 
+# Market data with the serving endpoint and local retrieval time.
 class MarketResponse(BaseModel):
-    """Market data with the serving endpoint and local retrieval time."""
-
     source: Source
     retrieved_at: datetime
     market: Market
