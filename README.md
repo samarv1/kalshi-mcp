@@ -41,8 +41,6 @@ flowchart LR
 
 The server uses the [official Python MCP SDK](https://github.com/modelcontextprotocol/python-sdk) for protocol handling and [HTTPX](https://www.python-httpx.org/) for asynchronous HTTP requests and connection reuse.
 
-With stdio, the client launches the server as a subprocess. Protocol messages use stdin and stdout; logs use stderr. This follows the [MCP transport specification](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports).
-
 ### Design choices
 
 | Choice | Why | Tradeoff |
@@ -53,13 +51,8 @@ With stdio, the client launches the server as a subprocess. Protocol messages us
 
 Concurrent requests and retries are capped. Only temporary read failures are retried, with rate limits respected.
 
-### Why not use the official Kalshi MCP?
-
-As of Nov 8, 2026, [Kalshi's official MCP](https://docs.kalshi.com/getting_started/mcp) discourages systematic scans in its tool descriptions. The settled-market responses we checked also omitted payout values and settlement timestamps. This server uses REST directly for discovery filters and settlement fields, without depending on the official MCP.
-
 ## Data handling
 
-- Listings return summaries and flag incomplete results. Fetch additional pages explicitly; use detail tools for contract rules.
 - Monetary values and quantities retain decimal strings. Missing values are separate from zero.
 - Retrieval time and exchange timestamps are separate. A new response can contain older quotes.
 - Errors are distinct from empty results. Batches retain successful results where supported and report failures.
@@ -68,7 +61,7 @@ As of Nov 8, 2026, [Kalshi's official MCP](https://docs.kalshi.com/getting_start
 
 ## Scope and exclusions
 
-Read-only market data only. No order placement, portfolio access, paper trading, research, or position sizing. Combo/RFQ workflows, perpetual futures, alerts, price-history analysis, and execution-cost estimates are outside the scope.
+Read-only market data. No trading or portfolio access. Combo/RFQ workflows, perpetual futures, and price-history tools are outside the scope.
 
 ## Setup
 
@@ -136,9 +129,9 @@ Merge this configuration, preserving existing servers:
 
 Save, then fully quit and reopen Claude Desktop.
 
-</details>
-
 For another client with local stdio support, use the same command and arguments in its configuration format.
+
+</details>
 
 ### 3. Try it
 
@@ -146,8 +139,7 @@ Reload your client, then ask:
 
 > Use Kalshi to find one open market and show its rules and order book.
 
-<details>
-<summary>Development checks</summary>
+## Testing
 
 Run offline tests:
 
@@ -162,8 +154,6 @@ KALSHI_LIVE_TEST=1 uv run --locked pytest tests/test_live.py -q -s
 ```
 
 The live check exercises all seven tools against Kalshi. It can fail if the network or sample data is unavailable.
-
-</details>
 
 ## API references
 
