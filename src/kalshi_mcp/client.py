@@ -1,7 +1,9 @@
 import asyncio
+import json
 import math
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from typing import Any
 from urllib.parse import quote
 
 import httpx
@@ -16,6 +18,12 @@ from kalshi_mcp.models import (
     MarketListResponse,
     MarketPayload,
     MarketResponse,
+    OrderbookEntry,
+    OrderbookError,
+    OrderbookFailure,
+    OrderbookSuccess,
+    OrderbooksPayload,
+    OrderbooksResponse,
     SeriesContextError,
     SeriesListPayload,
     SeriesListResponse,
@@ -69,6 +77,73 @@ class KalshiClient:
     def __init__(self, http: httpx.AsyncClient) -> None:
         self.http = http
         self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+
+    # Unknown tickers also have empty books, so verify existence before the batch read.
+    # One outer deadline covers all lookups, retries, and the final batch request.
+    async def get_orderbooks(self, tickers: list[str], depth: int = 20) -> OrderbooksResponse:
+        results: dict[str, OrderbookSuccess | OrderbookFailure] = {}
+
+        def failure(ticker: str, exc: KalshiError) -> None:
+            results[ticker] = OrderbookFailure(
+                ticker=ticker,
+                error=OrderbookError(
+                    code=exc.code, source=exc.source, status_code=exc.status_code
+                ),
+            )
+
+        async def verify(ticker: str) -> None:
+            try:
+                market = await self.get_market(ticker)
+                if market.source == "historical":
+                    failure(ticker, KalshiError("orderbook_unavailable", "historical"))
+            except KalshiError as exc:
+                failure(ticker, exc)
+
+        try:
+            async with asyncio.timeout(TOOL_TIMEOUT_SECONDS) as deadline:
+                async with asyncio.TaskGroup() as group:
+                    for ticker in tickers:
+                        group.create_task(verify(ticker))
+                eligible = [ticker for ticker in tickers if ticker not in results]
+                if eligible:
+                    payload, retrieved_at = await self._read_payload(
+                        "/markets/orderbooks", "live", deadline, OrderbooksPayload,
+                        {"tickers": eligible},
+                    )
+                    entries: dict[str, list[Any]] = {ticker: [] for ticker in eligible}
+                    for entry in payload.orderbooks:
+                        if not isinstance(entry, dict) or not isinstance(entry.get("ticker"), str):
+                            raise KalshiError("invalid_response", "live")
+                        if entry["ticker"] not in entries:
+                            raise KalshiError("invalid_response", "live")
+                        entries[entry["ticker"]].append(entry)
+                    for ticker, matches in entries.items():
+                        if not matches:
+                            failure(ticker, KalshiError("missing_result", "live"))
+                            continue
+                        try:
+                            if len(matches) != 1:
+                                raise KalshiError("invalid_response", "live")
+                            entry = OrderbookEntry.model_validate_json(json.dumps(matches[0]))
+                        except (ValidationError, KalshiError):
+                            failure(ticker, KalshiError("invalid_response", "live"))
+                            continue
+                        book = entry.orderbook_fp
+                        results[ticker] = OrderbookSuccess(
+                            ticker=ticker, retrieved_at=retrieved_at,
+                            orderbook_fp=book.model_copy(update={
+                                "yes_dollars": book.yes_dollars[-depth:],
+                                "no_dollars": book.no_dollars[-depth:],
+                            }),
+                            yes_truncated=len(book.yes_dollars) > depth,
+                            no_truncated=len(book.no_dollars) > depth,
+                        )
+        except (TimeoutError, KalshiError) as exc:
+            error = exc if isinstance(exc, KalshiError) else KalshiError("timeout", "live")
+            for ticker in tickers:
+                if ticker not in results:
+                    failure(ticker, error)
+        return OrderbooksResponse(depth=depth, results=[results[ticker] for ticker in tickers])
 
     # Fetch and validate live or historical market data under one deadline.
     # Only a live 404 permits historical lookup. Temporary failures retain their error.
@@ -278,7 +353,7 @@ class KalshiClient:
         source: Source,
         deadline: asyncio.Timeout,
         payload_type: type[Payload],
-        params: dict[str, str] | None = None,
+        params: dict[str, str | list[str]] | None = None,
     ) -> tuple[Payload, datetime]:
         response = await self._request(path, source, deadline, params)
         retrieved_at = datetime.now(UTC)
@@ -294,7 +369,7 @@ class KalshiClient:
         path: str,
         source: Source,
         deadline: asyncio.Timeout,
-        params: dict[str, str] | None = None,
+        params: dict[str, str | list[str]] | None = None,
     ) -> httpx.Response:
         for attempt in range(2):
             try:

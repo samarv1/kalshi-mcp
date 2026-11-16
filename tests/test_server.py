@@ -45,6 +45,7 @@ print('http_requests=' + str(len(requests)), file=sys.stderr)
         "list_series": {"category": "Economics", "unexpected": True},
         "list_events": {"series_ticker": "EXAMPLE", "unexpected": True},
         "list_markets": {"event_ticker": "EXAMPLE", "max_close_time": 0},
+        "get_orderbooks": {"tickers": ["EXAMPLE"], "unexpected": True},
     }
     with stderr_path.open("w") as stderr:
         async with stdio_client(parameters, errlog=stderr) as (read, write):
@@ -78,6 +79,12 @@ event = json.loads(os.environ['TEST_EVENT'])
 def handle(request):
     if request.url.path.endswith('/MISSING'):
         return httpx.Response(404)
+    if request.url.path.endswith('/orderbooks'):
+        assert request.url.params.get_list('tickers') == [market['ticker']]
+        return httpx.Response(200, json={'orderbooks': [{
+            'ticker': market['ticker'],
+            'orderbook_fp': {'yes_dollars': [['0.4200', '13.50']], 'no_dollars': []},
+        }]})
     if request.url.path.endswith('/series'):
         assert dict(request.url.params) == {'category': 'Economics', 'tags': 'Inflation'}
         return httpx.Response(200, json={'series': [series, {**series, 'ticker': 'SECOND'}]})
@@ -126,6 +133,7 @@ print('http_closed=' + str(http.is_closed), file=sys.stderr)
                 tools = {tool.name: tool for tool in discovery.tools}
                 assert set(tools) == {
                     "get_market", "get_series", "list_series", "get_event", "list_events", "list_markets",
+                    "get_orderbooks",
                 }
                 tool = tools["get_market"]
                 assert tool.description == "Read a market's rules, prices, status, and available settlement data."
@@ -245,4 +253,17 @@ print('http_closed=' + str(http.is_closed), file=sys.stderr)
                 assert invalid_filters.is_error
                 assert "Status is incompatible" in invalid_filters.content[0].text
                 assert "mve_filter" not in tools["list_markets"].input_schema["properties"]
+                books = await session.call_tool("get_orderbooks", {
+                    "tickers": [market["ticker"], "MISSING"], "depth": 1,
+                })
+                assert not books.is_error
+                results = books.structured_content["results"]
+                assert results[0]["orderbook_fp"]["yes_dollars"] == [["0.4200", "13.50"]]
+                assert results[0]["error"] is None
+                assert results[1]["error"]["code"] == "not_found"
+                assert set(tools["get_orderbooks"].input_schema["properties"]) == {"tickers", "depth"}
+                for arguments in ({"tickers": []}, {"tickers": ["A", "A"]},
+                                  {"tickers": ["A"], "depth": 101}):
+                    rejected = await session.call_tool("get_orderbooks", arguments)
+                    assert rejected.is_error
     assert "http_closed=True" in stderr_path.read_text()

@@ -15,6 +15,7 @@ from kalshi_mcp.models import (
     EventResponse,
     MarketListResponse,
     MarketResponse,
+    OrderbooksResponse,
     SeriesListResponse,
     SeriesResponse,
 )
@@ -23,6 +24,8 @@ from kalshi_mcp.tools import (
     EventStatus,
     ListingLimit,
     MarketStatus,
+    OrderbookDepth,
+    OrderbookTickers,
     SeriesFilter,
     Ticker,
     TickerFilter,
@@ -30,6 +33,7 @@ from kalshi_mcp.tools import (
 )
 from kalshi_mcp.tools import get_event as read_event
 from kalshi_mcp.tools import get_market as read_market
+from kalshi_mcp.tools import get_orderbooks as read_orderbooks
 from kalshi_mcp.tools import get_series as read_series
 from kalshi_mcp.tools import list_events as find_events
 from kalshi_mcp.tools import list_markets as find_markets
@@ -200,6 +204,21 @@ async def list_markets(
         limit=limit,
         cursor=cursor,
     )
+
+
+@mcp.tool(
+    description=(
+        "Read YES and NO bids for up to 10 distinct market tickers. "
+        "Return one book or error per ticker in input order. "
+        "Depth defaults to 20 levels per side, with a maximum of 100. "
+        "Books do not guarantee fills."
+    ),
+    annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True),
+)
+async def get_orderbooks(
+    tickers: OrderbookTickers, ctx: Context[KalshiClient], depth: OrderbookDepth = 20
+) -> OrderbooksResponse:
+    return await read_orderbooks(ctx.request_context.lifespan_context, tickers, depth)
 
 
 # Keep logs on stderr because stdout carries MCP protocol messages.

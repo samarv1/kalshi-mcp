@@ -1,7 +1,8 @@
 from datetime import datetime
+from decimal import Decimal
 from typing import Annotated, Any, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, StringConstraints
+from pydantic import AwareDatetime, BaseModel, ConfigDict, StringConstraints, field_validator
 
 
 Source = Literal["live", "historical"]
@@ -11,6 +12,67 @@ Ticker = Annotated[
 ]
 NonEmptyString = Annotated[str, StringConstraints(min_length=1)]
 DecimalString = Annotated[str, StringConstraints(pattern=r"^[0-9]+(?:\.[0-9]+)?$")]
+
+
+class Orderbook(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    yes_dollars: list[tuple[DecimalString, DecimalString]]
+    no_dollars: list[tuple[DecimalString, DecimalString]]
+
+    # Kalshi returns ascending bid levels. Preserve strings while checking price order.
+    @field_validator("yes_dollars", "no_dollars")
+    @classmethod
+    def validate_levels(
+        cls, levels: list[tuple[str, str]]
+    ) -> list[tuple[str, str]]:
+        previous = Decimal("-1")
+        for price, quantity in levels:
+            value = Decimal(price)
+            if not previous < value <= 1 or Decimal(quantity) <= 0:
+                raise ValueError("Invalid order-book levels.")
+            previous = value
+        return levels
+
+
+class OrderbookEntry(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    ticker: str
+    orderbook_fp: Orderbook
+
+
+class OrderbooksPayload(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    orderbooks: list[Any]
+
+
+class OrderbookSuccess(BaseModel):
+    ticker: str
+    source: Literal["live"] = "live"
+    retrieved_at: datetime
+    orderbook_fp: Orderbook
+    yes_truncated: bool
+    no_truncated: bool
+    error: None = None
+
+
+class OrderbookError(BaseModel):
+    code: str
+    source: Source | None = None
+    status_code: int | None = None
+
+
+class OrderbookFailure(BaseModel):
+    ticker: str
+    orderbook_fp: None = None
+    error: OrderbookError
+
+
+class OrderbooksResponse(BaseModel):
+    depth: int
+    results: list[OrderbookSuccess | OrderbookFailure]
 
 
 class PriceRange(BaseModel):

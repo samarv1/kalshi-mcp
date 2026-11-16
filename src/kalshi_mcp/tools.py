@@ -10,6 +10,7 @@ from kalshi_mcp.models import (
     EventResponse,
     MarketListResponse,
     MarketResponse,
+    OrderbooksResponse,
     SeriesListResponse,
     SeriesResponse,
     Ticker,
@@ -23,6 +24,31 @@ EventStatus = Literal["unopened", "open", "closed", "settled"]
 MarketStatus = Literal["unopened", "open", "paused", "closed", "settled"]
 UnixTimestamp = Annotated[int, Field(strict=True, ge=0)]
 Cursor = Annotated[str, StringConstraints(strict=True)]
+OrderbookTickers = Annotated[list[Ticker], Field(min_length=1, max_length=10)]
+OrderbookDepth = Annotated[int, Field(strict=True, ge=1, le=100)]
+
+
+class GetOrderbooksArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    tickers: OrderbookTickers
+    depth: OrderbookDepth = 20
+
+    @model_validator(mode="after")
+    def distinct_tickers(self) -> Self:
+        if len(set(self.tickers)) != len(self.tickers):
+            raise ValueError("Market tickers must be distinct.")
+        return self
+
+
+async def get_orderbooks(
+    client: KalshiClient, tickers: list[str], depth: int = 20
+) -> OrderbooksResponse:
+    try:
+        arguments = GetOrderbooksArguments(tickers=tickers, depth=depth)
+    except ValidationError as exc:
+        raise _invalid_arguments(exc) from exc
+    return await client.get_orderbooks(arguments.tickers, arguments.depth)
 
 
 class GetMarketArguments(BaseModel):
