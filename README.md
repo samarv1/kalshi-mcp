@@ -2,10 +2,6 @@
 
 A local Python MCP server that lets trading agents find Kalshi markets, read contract rules, check order books, and retrieve settlement data.
 
-## Setup
-
-TBD.
-
 ## Tools
 
 Kalshi groups markets into **series** (recurring event types) and **events** (specific occurrences). Each series, event, and market has a ticker used to look it up. For definitions of these terms, see [Key terms](#key-terms).
@@ -73,6 +69,101 @@ As of Nov 8, 2026, [Kalshi's official MCP](https://docs.kalshi.com/getting_start
 ## Scope and exclusions
 
 Read-only market data only. No order placement, portfolio access, paper trading, research, or position sizing. Combo/RFQ workflows, perpetual futures, alerts, price-history analysis, and execution-cost estimates are outside the scope.
+
+## Setup
+
+### 1. Install
+
+Requires Python 3.13 or later and [uv](https://docs.astral.sh/uv/getting-started/installation/). No Kalshi credentials are required.
+
+```sh
+git clone https://github.com/samarv1/kalshi-mcp.git
+cd kalshi-mcp
+uv sync --locked --python 3.13
+```
+
+### 2. Connect your client
+
+Choose one option below. Replace placeholder paths with absolute paths on your machine. Your client starts the server automatically.
+
+On macOS/Linux, use `command -v uv` for the executable path and `pwd` from this repository for its path.
+
+<details>
+<summary>Codex</summary>
+
+With the [Codex CLI](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) installed:
+
+```sh
+codex mcp add kalshi -- "/absolute/path/to/uv" --directory "/absolute/path/to/kalshi-mcp" run --locked kalshi-mcp
+```
+
+Fully quit and reopen Codex desktop to load it.
+
+</details>
+
+<details>
+<summary>Claude Code</summary>
+
+With [Claude Code](https://code.claude.com/docs/en/mcp) installed:
+
+```sh
+claude mcp add --transport stdio --scope user kalshi -- "/absolute/path/to/uv" --directory "/absolute/path/to/kalshi-mcp" run --locked kalshi-mcp
+```
+
+</details>
+
+<details>
+<summary>Claude Desktop, Cursor, and other clients</summary>
+
+- [Claude Desktop](https://modelcontextprotocol.io/docs/develop/connect-local-servers): Settings → Developer → Edit Config.
+- [Cursor](https://cursor.com/docs/mcp): open `~/.cursor/mcp.json`.
+
+Merge this configuration, preserving existing servers:
+
+```json
+{
+  "mcpServers": {
+    "kalshi": {
+      "command": "/absolute/path/to/uv",
+      "args": [
+        "--directory", "/absolute/path/to/kalshi-mcp",
+        "run", "--locked", "kalshi-mcp"
+      ]
+    }
+  }
+}
+```
+
+Save, then fully quit and reopen Claude Desktop.
+
+</details>
+
+For another client with local stdio support, use the same command and arguments in its configuration format.
+
+### 3. Try it
+
+Reload your client, then ask:
+
+> Use Kalshi to find one open market and show its rules and order book.
+
+<details>
+<summary>Development checks</summary>
+
+Run offline tests:
+
+```sh
+uv run --locked pytest -q
+```
+
+Run the opt-in live check on macOS or Linux:
+
+```sh
+KALSHI_LIVE_TEST=1 uv run --locked pytest tests/test_live.py -q -s
+```
+
+The live check exercises all seven tools against Kalshi. It can fail if the network or sample data is unavailable.
+
+</details>
 
 ## API references
 
